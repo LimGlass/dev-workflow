@@ -11,12 +11,15 @@ decisions/                 Cross-project ADRs (source of truth; Notion links her
 templates/                 Copy into each new project
   AGENTS.md                Shared agent rules (fill in the {{...}} placeholders)
   CLAUDE.md                Imports AGENTS.md for Claude Code
-  .claude/settings.json    Permission deny/ask rules (push, merge, flash guards)
+  .claude/settings.json    Permission deny/ask rules + PreToolUse guard hook registration
+  .claude/hooks/guard.js   Blocks pushes to main and firmware uploads (needs Node.js)
+  .claude/hooks/guard.test.js  Tests for the guard: node .claude/hooks/guard.test.js
   .collab/
+    decisions/             Project-specific ADRs
     tasks/TEMPLATE.md      Task spec: front matter + Goal/Context/Acceptance/Plan/Out of scope
     reviews/TEMPLATE.md    Review record: verdict + findings table
     log.md                 Append-only handoff log
-.claude/settings.json      Same guard rules, applied to this repo
+.claude/                   Same settings and guard hook, applied to this repo
 ```
 
 ## Using the templates in a project
