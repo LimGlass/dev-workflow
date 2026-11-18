@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push origin main:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(pio run -t upload:*)",
+      "Bash(esptool:*)",
+      "Bash(idf.py flash:*)",
+      "Bash(arduino-cli upload:*)",
+      "Read(./.env)"
+    ],
+    "ask": [
+      "Bash(git push:*)"
+    ]
+  }
+}
