@@ -1,6 +1,6 @@
 # ADR-0001: Claude Code as host, Codex as reviewer via codex-plugin-cc
 
-**Status:** Proposed  
+**Status:** Accepted (2026-11-18)  
 **Date:** 2026-11-18  
 **Decision owner:** Human project owner  
 **Scope:** Reusable development workflow for NOVA and future projects
