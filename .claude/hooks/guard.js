@@ -18,8 +18,20 @@
 // push, upload, uploadfs, flash or esptool; everything else is allowed and goes
 // through the normal permission rules.
 //
+// Text sent to a command's stdin is checked too: heredocs (<<, <<-), here-strings
+// (<<<), and piped literals (echo, printf, PowerShell strings and Write-Output,
+// passed on through cat/tee). Where it goes decides what happens:
+//   - text-only consumers (cat, tee, gh ... --body-file -, git commit -F -):
+//     not checked, so quoted heredoc bodies may mention anything
+//   - shells (bash, sh, ..., pwsh, cmd): checked as a script
+//   - anything else (python, node, perl, ruby, unknown programs, groups):
+//     blocked when it mentions push/upload/flash/esptool
+// $(...) and backticks in unquoted heredocs are always checked.
+//
 // This catches mistakes; it is not a sandbox. Scripts, aliases and git aliases
-// are not inspected. The deny rules in settings.json remain a second layer.
+// are not inspected, nor is stdin whose content is not known in advance
+// (cat file | bash, bash < file, curl ... | bash) or text that hides the words
+// above. The deny rules in settings.json remain a second layer.
 
 'use strict';
 
@@ -69,29 +81,115 @@ function matchParen(src, open) {
   throw new ParseError('unterminated $( )');
 }
 
+// Unquoted heredoc body: $(...) and backticks still run, so pull them out as
+// substitutions; \$, \` and \\ are escapes. Returns the body text with markers.
+function scanHeredocBody(body, subs) {
+  let text = '';
+  for (let j = 0; j < body.length;) {
+    const d = body[j];
+    if (d === '\\' && '$`\\'.includes(body[j + 1] || '')) { text += body[j + 1]; j += 2; continue; }
+    if (d === '$' && body[j + 1] === '(') {
+      const end = matchParen(body, j + 1);
+      const inner = body.slice(j + 2, end);
+      subs.push(inner);
+      text += marker(inner);
+      j = end + 1;
+      continue;
+    }
+    if (d === '`') {
+      const end = body.indexOf('`', j + 1);
+      if (end < 0) throw new ParseError('unterminated backtick in heredoc');
+      const inner = body.slice(j + 1, end);
+      subs.push(inner);
+      text += marker(inner);
+      j = end + 1;
+      continue;
+    }
+    text += d;
+    j++;
+  }
+  return text;
+}
+
 // Splits a command line into simple commands (arrays of words).
 // dialect: 'bash' | 'ps' (PowerShell) | 'cmd'.
-// Returns { segments, subs } where subs are command substitutions to check too.
+// Returns { segments, subs, metas } where subs are command substitutions to
+// check too, and metas[k] describes segments[k]'s stdin:
+//   stdin:  text fed by heredocs (<<) and here-strings (<<<), as { kind, text, quoted }
+//   pipeIn: true when the previous segment's output is piped into this one
+//   pipeFromGroup: the pipe comes straight after a ( ... ) group
+//   firstQuoted: the command word was quoted (in PowerShell that makes it a string value)
+// A segment with no words is kept when a heredoc or here-string is redirected
+// into it, e.g. (bash) <<'EOF', so that text is still checked.
 function tokenize(src, dialect) {
   const segments = [];
   const subs = [];
+  const metas = [];
+  const newMeta = () => ({ stdin: [], pipeIn: false, pipeFromGroup: false, firstQuoted: false });
   let words = [];
+  let meta = newMeta();
   let cur = '';
   let inWord = false;
+  let wordQuoted = false;
   let dropNext = false; // next word is a redirection target
+  let capture = null; // next word is a here-string for this segment's meta
+  let pipeNext = false; // the next segment reads the previous one's output
+  let groupNext = false; // ... and that output comes from a ( ... ) group
+  let parenClosed = false; // the last token was )
+  const heredocs = []; // heredocs whose bodies start after the next newline
 
   const flushWord = () => {
     if (inWord) {
-      if (dropNext) dropNext = false;
-      else words.push(cur);
+      if (capture) {
+        capture.stdin.push({ kind: 'here-string', text: cur, quoted: wordQuoted });
+        capture = null;
+      } else if (dropNext) {
+        dropNext = false;
+      } else {
+        if (!words.length) meta.firstQuoted = wordQuoted;
+        words.push(cur);
+      }
     }
     cur = '';
     inWord = false;
+    wordQuoted = false;
   };
   const endSegment = () => {
     flushWord();
-    if (words.length) segments.push(words);
+    capture = null;
+    if (words.length || meta.stdin.length || heredocs.some((h) => h.meta === meta)) {
+      meta.pipeIn = pipeNext;
+      meta.pipeFromGroup = groupNext;
+      segments.push(words);
+      metas.push(meta);
+    }
     words = [];
+    meta = newMeta();
+    pipeNext = false;
+    groupNext = false;
+    parenClosed = false;
+  };
+  // Consume the bodies of pending heredocs, starting at the line after the operator.
+  const readHeredocs = (start) => {
+    let j = start;
+    for (const h of heredocs) {
+      let body = '';
+      for (;;) {
+        if (j >= src.length) throw new ParseError('unterminated heredoc');
+        let eol = src.indexOf('\n', j);
+        if (eol < 0) eol = src.length;
+        let line = src.slice(j, eol);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (h.dash) line = line.replace(/^\t+/, '');
+        j = eol + 1;
+        if (line === h.delim) break;
+        body += `${line}\n`;
+      }
+      const text = h.quoted ? body : scanHeredocBody(body, subs);
+      h.meta.stdin.push({ kind: 'heredoc', text, quoted: h.quoted });
+    }
+    heredocs.length = 0;
+    return j;
   };
 
   const n = src.length;
@@ -123,6 +221,7 @@ function tokenize(src, dialect) {
       }
       cur += buf;
       inWord = true;
+      wordQuoted = true;
       i = j + 1;
       continue;
     }
@@ -165,6 +264,7 @@ function tokenize(src, dialect) {
       }
       cur += buf;
       inWord = true;
+      wordQuoted = true;
       i = j + 1;
       continue;
     }
@@ -196,7 +296,13 @@ function tokenize(src, dialect) {
     }
 
     if (c === ' ' || c === '\t' || c === '\r') { flushWord(); i++; continue; }
-    if (c === '\n' || c === ';') { endSegment(); i++; continue; }
+    if (c === '\n') {
+      endSegment();
+      i++;
+      if (heredocs.length) i = readHeredocs(i);
+      continue;
+    }
+    if (c === ';') { endSegment(); i++; continue; }
 
     if (c === '&') {
       if (next === '>') {
@@ -212,11 +318,58 @@ function tokenize(src, dialect) {
       continue;
     }
     if (c === '|') {
+      const fromGroup = parenClosed;
       endSegment();
-      i += next === '|' || next === '&' ? 2 : 1;
+      if (next === '|') { i += 2; continue; } // ||
+      pipeNext = true; // | and |&
+      groupNext = fromGroup;
+      i += next === '&' ? 2 : 1;
       continue;
     }
-    if (c === '(' || c === ')') { endSegment(); i++; continue; }
+    if (c === '(' || c === ')') {
+      endSegment();
+      if (c === ')') parenClosed = true;
+      i++;
+      continue;
+    }
+
+    if (dialect === 'bash' && c === '<' && next === '<') {
+      if (inWord && /^\d+$/.test(cur)) { cur = ''; inWord = false; wordQuoted = false; } else flushWord();
+      if (src[i + 2] === '<') { // here-string: the next word is stdin
+        capture = meta;
+        i += 3;
+        continue;
+      }
+      // heredoc: <<WORD or <<-WORD; any quoting in WORD makes the body literal
+      i += 2;
+      let dash = false;
+      if (src[i] === '-') { dash = true; i++; }
+      while (src[i] === ' ' || src[i] === '\t') i++;
+      let delim = '';
+      let quoted = false;
+      while (i < n && !/[\s;&|<>()]/.test(src[i])) {
+        const d = src[i];
+        if (d === "'" || d === '"') {
+          const end = src.indexOf(d, i + 1);
+          if (end < 0) throw new ParseError('unterminated quote in heredoc delimiter');
+          delim += src.slice(i + 1, end);
+          quoted = true;
+          i = end + 1;
+          continue;
+        }
+        if (d === '\\') {
+          if (i + 1 < n) delim += src[i + 1];
+          quoted = true;
+          i += 2;
+          continue;
+        }
+        delim += d;
+        i++;
+      }
+      if (!delim) throw new ParseError('missing heredoc delimiter');
+      heredocs.push({ delim, dash, quoted, meta });
+      continue;
+    }
 
     if (c === '>' || c === '<') {
       // Drop a leading file descriptor (2>, *>) and the redirection target.
@@ -238,7 +391,8 @@ function tokenize(src, dialect) {
     i++;
   }
   endSegment();
-  return { segments, subs };
+  if (heredocs.length) throw new ParseError('unterminated heredoc');
+  return { segments, subs, metas };
 }
 
 // ------------------------------------------------------------------ helpers
@@ -318,7 +472,8 @@ function analyze(src, ctx, depth) {
   const results = [
     ...parsed.subs.map((sub) => () =>
       analyze(sub, { ...local, dialect: local.dialect === 'ps' ? 'ps' : 'bash' }, depth + 1)),
-    ...parsed.segments.map((words) => () => checkSegment(words, local, depth)),
+    ...parsed.segments.map((words, k) => () =>
+      checkSegment(words, local, depth, stdinText(parsed, k, local.dialect))),
   ];
   for (const next of results) {
     const r = next();
@@ -382,16 +537,128 @@ function stripWrappers(words) {
   return { words: w, uncertain };
 }
 
-function checkSegment(words, ctx, depth) {
+// stdin: text known to reach this command's stdin (heredoc, here-string or
+// piped literal), or null when there is none or it cannot be known.
+function checkSegment(words, ctx, depth, stdin = null) {
   const { words: w, uncertain } = stripWrappers(words);
-  if (!w.length) return null;
-  const where = show(words.join(' '));
-  const r = isDynamic(w[0])
+  const where = show(words.join(' ') || '(group)');
+  const wrap = (r) => {
+    if (!r) return null;
+    if (typeof r === 'string') return { reason: r, where };
+    return r.where ? r : { ...r, where };
+  };
+  // No command of its own ({ ...; } <<EOF, (...) <<EOF): the text goes to
+  // whatever runs inside the group, so treat it as an unknown consumer.
+  if (!w.length) return stdin === null ? null : wrap(checkStdin(null, [], stdin, ctx, depth));
+  const dynamicName = isDynamic(w[0]);
+  const name = dynamicName ? null : normName(w[0]);
+  const r = wrap(dynamicName
     ? unsure(ctx, 'the command name is computed at run time')
-    : checkCommand(normName(w[0]), w.slice(1), ctx, depth, uncertain);
-  if (!r) return null;
-  if (typeof r === 'string') return { reason: r, where };
-  return r.where ? r : { ...r, where };
+    : checkCommand(name, w.slice(1), ctx, depth, uncertain));
+  if ((r && !r.soft) || stdin === null) return r;
+  const s = wrap(checkStdin(name, w.slice(1), stdin, ctx, depth));
+  if (s && !s.soft) return s;
+  return r || s;
+}
+
+// ------------------------------------------------------------- stdin text
+
+const GROUP_END = new Set(['done', 'fi', 'esac']);
+
+// The segment closes a { ...; } group or a loop/if/case, so its output is
+// whatever the commands inside wrote.
+function closesGroup(words) {
+  if (!words.length) return true;
+  if (GROUP_END.has(normName(words[0]))) return true;
+  return !stripWrappers(words).words.length && words.includes('}');
+}
+
+// Text reaching segment k's stdin: its heredocs and here-strings, plus the
+// output of a piped producer when that output is a known literal. When the
+// producer is a group, its exact members are not tracked, so every literal
+// output earlier in the command is counted (over-approximation, fails safe).
+function stdinText(parsed, k, dialect) {
+  const meta = parsed.metas[k];
+  const parts = meta.stdin.map((s) => s.text);
+  if (meta.pipeIn && k > 0) {
+    if (meta.pipeFromGroup || closesGroup(parsed.segments[k - 1])) {
+      for (let j = 0; j < k; j++) {
+        const out = stdoutText(parsed, j, dialect);
+        if (out !== null) parts.push(out);
+      }
+    } else {
+      const up = stdoutText(parsed, k - 1, dialect);
+      if (up !== null) parts.push(up);
+    }
+  }
+  return parts.length ? parts.join('\n') : null;
+}
+
+const unescapeC = (s) => s.replace(/\\([ntr\\])/g, (_, e) => ({ n: '\n', t: '\t', r: '\r', '\\': '\\' })[e]);
+
+// Output of segment k when it is a literal known before running: echo/printf,
+// a PowerShell string value or Write-Output, or cat/tee passing literal stdin on.
+// null when the output cannot be known (files, network, other programs).
+function stdoutText(parsed, k, dialect) {
+  const words = parsed.segments[k];
+  if (dialect === 'ps' && parsed.metas[k].firstQuoted) {
+    // 'text' | ... or @'...'@ | ...: a string value, not a command
+    return words.join('\n').replace(/^@\r?\n?([\s\S]*?)\r?\n?@$/, '$1');
+  }
+  const { words: w } = stripWrappers(words);
+  if (!w.length || isDynamic(w[0])) return null;
+  const name = normName(w[0]);
+  let args = w.slice(1);
+  if (name === 'echo' || (dialect === 'ps' && (name === 'write-output' || name === 'write'))) {
+    let esc = false;
+    if (dialect === 'bash') {
+      while (args.length && /^-[neE]+$/.test(args[0])) {
+        if (args[0].includes('e')) esc = true;
+        args = args.slice(1);
+      }
+    }
+    const text = args.join(dialect === 'ps' ? '\n' : ' ');
+    return esc ? unescapeC(text) : text;
+  }
+  if (name === 'printf' && dialect === 'bash') return unescapeC(args.join(' '));
+  if (name === 'tee') return stdinText(parsed, k, dialect);
+  if (name === 'cat') {
+    if (args.some((a) => a !== '-' && !a.startsWith('-'))) return null; // reads files
+    return stdinText(parsed, k, dialect);
+  }
+  return null;
+}
+
+// Commands that only treat stdin as text: it is never run as code.
+function isTextConsumer(name, args) {
+  if (name === 'cat' || name === 'tee') return true;
+  if (name === 'gh') {
+    return args.some((a, i) => a === '--body-file=-' || (a === '--body-file' && args[i + 1] === '-'));
+  }
+  if (name === 'git') {
+    let i = 0;
+    while (i < args.length && args[i].startsWith('-')) {
+      i += args[i] === '-C' || GIT_VALUE_OPTS.includes(args[i]) ? 2 : 1;
+    }
+    if ((args[i] || '').toLowerCase() !== 'commit') return false;
+    const rest = args.slice(i + 1);
+    return rest.some((a, j) => a === '--file=-' || a === '-F-'
+      || ((a === '-F' || a === '--file') && rest[j + 1] === '-'));
+  }
+  return false;
+}
+
+// Text reaching a command's stdin: free for text-only consumers; checked as a
+// script for shells; for anything else (python, node, perl, ruby, unknown
+// programs) blocked when it mentions push/upload/flash/esptool.
+function checkStdin(name, args, text, ctx, depth) {
+  if (name !== null && isTextConsumer(name, args)) return null;
+  if (name !== null && SHELLS.has(name)) return analyze(text, { ...ctx, dialect: 'bash' }, depth + 1);
+  if (name === 'powershell' || name === 'pwsh') return analyze(text, { ...ctx, dialect: 'ps' }, depth + 1);
+  if (name === 'cmd') return analyze(text, { ...ctx, dialect: 'cmd' }, depth + 1);
+  return RISKY.test(text)
+    ? `input sent to ${name === null ? 'a computed command' : name} mentions push/upload/flash/esptool and cannot be checked`
+    : null;
 }
 
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'mksh', 'fish']);

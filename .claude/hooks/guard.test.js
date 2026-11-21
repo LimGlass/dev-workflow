@@ -137,6 +137,41 @@ const BLOCK = [
   { group: 'computed', cmd: 'git push origin $BRANCH main', reason: /updates main/ },
   { group: 'computed', cmd: 'pio run -t $TARGET -t upload', reason: /target "upload"/ },
   { group: 'computed', cmd: 'git status; if ($?) { git push origin main }', tool: 'PowerShell', reason: /updates main/ },
+  // stdin text (heredocs, here-strings, piped literals) sent to anything but a text-only consumer
+  { group: 'heredoc', cmd: 'python <<\'EOF\'\nimport os\nos.system("git push origin main")\nEOF' },
+  { group: 'heredoc', cmd: 'python3 <<"EOF"\nimport subprocess\nsubprocess.run(["pio", "run", "-t", "upload"])\nEOF' },
+  { group: 'heredoc', cmd: 'node <<\'EOF\'\nrequire("child_process").execSync("git push origin main")\nEOF' },
+  { group: 'heredoc', cmd: 'node <<\'EOF\'\nrequire("child_process").execSync("esptool.py write_flash 0x0 fw.bin")\nEOF' },
+  { group: 'heredoc', cmd: 'perl <<\'EOF\'\nsystem("git push origin main");\nEOF' },
+  { group: 'heredoc', cmd: 'ruby <<\'EOF\'\nsystem("pio run -t upload")\nEOF' },
+  { group: 'heredoc', cmd: 'some-unknown-tool <<\'EOF\'\ngit push origin main\nEOF' },
+  { group: 'heredoc', cmd: 'bash <<\'EOF\'\ngit push origin main\nEOF', reason: /updates main/ },
+  { group: 'heredoc', cmd: 'sh -s <<"EOF"\npio run -t upload\nEOF', reason: /target "upload"/ },
+  { group: 'heredoc', cmd: 'bash <<EOF\ngit push -f origin main\nEOF', reason: /updates main/ },
+  { group: 'heredoc', cmd: 'cat <<\'EOF\' | bash\ngit push origin main\nEOF', reason: /updates main/ },
+  // quoting the delimiter only stops the outer shell expanding; a shell consumer still runs $(...)
+  { group: 'heredoc', cmd: 'bash <<\'EOF\'\necho $(git push origin main)\nEOF', reason: /updates main/ },
+  { group: 'heredoc', cmd: 'sh <<"EOF"\nx=`pio run -t upload`\nEOF', reason: /target "upload"/ },
+  { group: 'here-string', cmd: "bash <<< 'git push origin main'", reason: /updates main/ },
+  { group: 'here-string', cmd: 'python <<< \'import os; os.system("git push origin main")\'' },
+  { group: 'piped', cmd: "printf 'git push origin main\\n' | bash", reason: /updates main/ },
+  { group: 'piped', cmd: "echo 'pio run -t upload' | sh", reason: /target "upload"/ },
+  { group: 'piped', cmd: 'printf \'import os\\nos.system("git push origin main")\\n\' | python' },
+  { group: 'piped', cmd: 'echo \'require("child_process").execSync("git push origin main")\' | node' },
+  { group: 'piped', cmd: "'git push origin main' | pwsh -Command -", tool: 'PowerShell', reason: /updates main/ },
+  { group: 'piped', cmd: '\'import os; os.system("git push origin main")\' | python', tool: 'PowerShell' },
+  { group: 'heredoc subs', cmd: 'cat <<EOF\nresult: `git push origin main`\nEOF', reason: /updates main/ },
+  { group: 'heredoc subs', cmd: 'cat <<EOF\nresult: $(git push origin HEAD:main)\nEOF', reason: /updates main/ },
+  { group: 'heredoc subs', cmd: 'gh pr create --body-file - <<EOF\n$(pio run -t upload)\nEOF', reason: /target "upload"/ },
+  { group: 'heredoc edge', cmd: 'cat <<\'EOF\' && git push origin main\nnotes\nEOF', reason: /updates main/ },
+  { group: 'heredoc edge', cmd: 'bash <<\'EOF\'\ngit push origin agent/x', reason: /unterminated heredoc/ },
+  // groups: stdin into a group, output piped out of a group
+  { group: 'heredoc group', cmd: '{ cat <<\'EOF\'; } | bash\ngit push origin main\nEOF', reason: /updates main/ },
+  { group: 'heredoc group', cmd: '(cat <<\'EOF\'; true) | bash\ngit push origin main\nEOF', reason: /updates main/ },
+  { group: 'heredoc group', cmd: 'for f in a; do cat <<\'EOF\'; done | sh\npio run -t upload\nEOF', reason: /target "upload"/ },
+  { group: 'heredoc group', cmd: '{ bash; } <<\'EOF\'\ngit push origin main\nEOF' },
+  { group: 'heredoc group', cmd: '(bash) <<\'EOF\'\ngit push origin main\nEOF' },
+  { group: 'heredoc group', cmd: 'while true; do bash; done <<\'EOF\'\ngit push origin main\nEOF' },
 ];
 
 const ALLOW = [
@@ -169,6 +204,22 @@ const ALLOW = [
   { group: 'wrapped', cmd: 'cmd /c "git status && git log --oneline -5"' },
   { group: 'wrapped', cmd: 'pwsh -c "git push origin agent/claude/x"' },
   { group: 'misc', cmd: 'node .claude/hooks/guard.test.js 2>&1' },
+  // stdin text sent to text-only consumers (cat, tee, gh --body-file -, git commit -F -)
+  { group: 'heredoc', cmd: 'gh pr create --body-file - <<\'EOF\'\nRun `npm test` and $(date); never git push origin main.\nEOF' },
+  { group: 'heredoc', cmd: 'gh pr create --body-file - <<"EOF"\nRun `npm test` and $(date); never git push origin main.\nEOF' },
+  { group: 'heredoc', cmd: 'gh issue create --body-file=- <<\'EOF\'\nSee `guard.js` for the upload rules.\nEOF' },
+  { group: 'heredoc', cmd: 'git commit -F - <<\'EOF\'\nDocument `pio run -t upload`\nEOF' },
+  { group: 'heredoc', cmd: 'git commit --file - <<\'EOF\'\nMention `git push origin main` in the README\nEOF' },
+  { group: 'heredoc', cmd: 'cat <<\'EOF\'\ngit push origin main\nEOF' },
+  { group: 'heredoc', cmd: 'cat > notes.md <<\'EOF\'\nRun `make flash` then $(echo upload)\nEOF' },
+  { group: 'heredoc', cmd: 'tee notes.md <<\'EOF\'\n`code` and git push origin main\nEOF' },
+  { group: 'heredoc', cmd: 'cat <<-\'EOF\'\n\tsee `pio run -t upload`\n\tEOF' },
+  { group: 'heredoc', cmd: 'cat <<\\EOF\nsee `esptool.py write_flash`\nEOF' },
+  { group: 'heredoc', cmd: 'cat <<EOF\nToday is $(date), see the push notes\nEOF' },
+  { group: 'heredoc', cmd: 'bash <<\'EOF\'\ngit push origin agent/claude/x\nEOF' },
+  { group: 'piped', cmd: "printf 'git push origin main\\n' | cat" },
+  { group: 'piped', cmd: "echo 'see `git push` docs' | tee log.txt" },
+  { group: 'heredoc edge', cmd: 'cat <<A <<\'B\'\nfirst push note\nA\nsecond `upload` note\nB' },
 ];
 
 // --------------------------------------------------------------------- run
@@ -235,6 +286,11 @@ try {
   if (fs.existsSync(templateGuard)) {
     report(fs.readFileSync(templateGuard, 'utf8') === fs.readFileSync(GUARD, 'utf8'),
       'templates/.claude/hooks/guard.js matches .claude/hooks/guard.js');
+  }
+  const templateTest = path.join(__dirname, '..', '..', 'templates', '.claude', 'hooks', 'guard.test.js');
+  if (fs.existsSync(templateTest)) {
+    report(fs.readFileSync(templateTest, 'utf8') === fs.readFileSync(__filename, 'utf8'),
+      'templates/.claude/hooks/guard.test.js matches .claude/hooks/guard.test.js');
   }
 
   const blockCount = BLOCK.length;
