@@ -1,7 +1,7 @@
 ---
 id: GUARD-2            # Linear issue ID, e.g. NOVA-12
 title: "Guard: text-only heredocs stop false positives; text fed to any other command is checked"
-status: in-progress    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+status: human-gate     # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-2
@@ -64,18 +64,18 @@ The allowlist is matched exactly, including the `-` stdin argument. A bare `gh` 
 
 ## Acceptance criteria
 
-- [ ] The bash tokenizer recognises `<<WORD`, `<<-WORD` and `<<<word`. It works out whether a heredoc delimiter is quoted and consumes the body up to the delimiter line. Body lines no longer become command segments.
-- [ ] Stdin text from heredocs, here-strings and literal pipe producers is attached to the command that receives it, in both the bash and PowerShell dialects.
-- [ ] **Allowlisted text consumers** (`cat`, `tee`, `gh … --body-file -`, `git commit -F -`) get heredoc/here-string/piped text unchecked. Backticks, `$(...)` and words like "git push origin main" in a quoted body don't cause a block.
-- [ ] **Pass-through:** text that goes through `cat`/`tee` into another command via a pipe is checked against that next command.
-- [ ] **Any other consumer** has its stdin text scanned. Shells: full guard parse with the RISKY fallback. Non-shells (python, node, perl, ruby, unknown): block if the text matches RISKY.
-- [ ] **Unquoted heredocs:** every `$(...)` and backtick substitution in the body is checked, even when the consumer is allowlisted.
-- [ ] An unterminated heredoc fails safe: treated as unparseable, so it's blocked if the text matches RISKY.
-- [ ] Multiple heredocs on one line (`cmd <<A <<'B'`), and commands after the operator on the same line (`&&`, `;`, `|`), are handled. Those later commands are still checked.
-- [ ] New test cases in `.claude/hooks/guard.test.js` (see the test list below), plus all existing tests still pass.
-- [ ] `templates/.claude/hooks/guard.js` and `templates/.claude/hooks/guard.test.js` stay byte-identical to the `.claude/` copies.
-- [ ] The guard header comment documents the heredoc/stdin rules and the limits listed under "Out of scope".
-- [ ] Codex review round on the implementation with no unresolved P1/P2 or high findings.
+- [x] The bash tokenizer recognises `<<WORD`, `<<-WORD` and `<<<word`. It works out whether a heredoc delimiter is quoted and consumes the body up to the delimiter line. Body lines no longer become command segments.
+- [x] Stdin text from heredocs, here-strings and literal pipe producers is attached to the command that receives it, in both the bash and PowerShell dialects.
+- [x] **Allowlisted text consumers** (`cat`, `tee`, `gh … --body-file -`, `git commit -F -`) get heredoc/here-string/piped text unchecked. Backticks, `$(...)` and words like "git push origin main" in a quoted body don't cause a block.
+- [x] **Pass-through:** text that goes through `cat`/`tee` into another command via a pipe is checked against that next command.
+- [x] **Any other consumer** has its stdin text scanned. Shells: full guard parse with the RISKY fallback. Non-shells (python, node, perl, ruby, unknown): block if the text matches RISKY.
+- [x] **Unquoted heredocs:** every `$(...)` and backtick substitution in the body is checked, even when the consumer is allowlisted.
+- [x] An unterminated heredoc fails safe: treated as unparseable, so it's blocked if the text matches RISKY.
+- [x] Multiple heredocs on one line (`cmd <<A <<'B'`), and commands after the operator on the same line (`&&`, `;`, `|`), are handled. Those later commands are still checked.
+- [x] New test cases in `.claude/hooks/guard.test.js` (see the test list below), plus all existing tests still pass.
+- [x] `templates/.claude/hooks/guard.js` and `templates/.claude/hooks/guard.test.js` stay byte-identical to the `.claude/` copies.
+- [x] The guard header comment documents the heredoc/stdin rules and the limits listed under "Out of scope".
+- [x] Codex review round on the implementation with no unresolved P1/P2 or high findings.
 
 ### Test cases
 
