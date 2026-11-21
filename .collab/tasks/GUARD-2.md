@@ -1,7 +1,7 @@
 ---
 id: GUARD-2            # Linear issue ID, e.g. NOVA-12
 title: "Guard: text-only heredocs stop false positives; text fed to any other command is checked"
-status: ready          # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+status: in-progress    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-2
