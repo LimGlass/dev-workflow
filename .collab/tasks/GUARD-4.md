@@ -1,7 +1,7 @@
 ---
 id: GUARD-4            # Linear issue ID, e.g. NOVA-12
 title: "Versioned Git pre-push hook rejecting pushes to main, plus guard rules against skipping or disabling it"
-status: plan-review    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+status: in-progress    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-4
@@ -31,7 +31,7 @@ Add a second, independent layer against pushes to `main`: a versioned Git `pre-p
 
 ## Design
 
-1. **The hook: `.githooks/pre-push`**, POSIX `sh` with no dependencies. It runs under Git for Windows' bundled sh and on macOS/Linux. It reads every stdin line and rejects if any remote ref equals `refs/heads/main`, compared case-insensitively to match the guard. That includes creates, updates, force-updates and deletes. It prints an ADR-0001 message naming the remote and exits 1 after reading all lines, so every offending ref is reported. Committed with mode `100755`.
+1. **The hook: `.githooks/pre-push`**, POSIX `sh` with no dependencies. It runs under Git for Windows' bundled sh and on macOS/Linux. It reads every stdin line and rejects if any remote ref equals `refs/heads/main`, compared case-insensitively to match the guard. That includes creates, updates, force-updates and deletes. It prints an ADR-0001 message naming the remote and exits 1 after reading all lines, so every offending ref is reported. Committed with mode `100755`. A `.gitattributes` rule (`.githooks/* text eol=lf`, in this repo and in `templates/`) keeps it LF on Windows: this repo has `core.autocrlf=true`, and a CRLF shebang would break the script.
 2. **Activation.** This repo sets `git config core.hooksPath .githooks`. The README setup steps add the same command for new projects, and `templates/.githooks/pre-push` is a byte-identical copy.
 3. **Guard rule A: the hook must be active.** If the repository being pushed from contains `.githooks/pre-push` and its effective `core.hooksPath` (read with the same `-C`/`-c` options as the push) is not `.githooks`, `git push` is blocked with the one-line fix. Repos without the hook file are unaffected. **This is a decision for you:** it adds friction on fresh clones until the hook is enabled, but without it the hook protects nothing until someone remembers to set it.
 4. **Guard rule B: no skipping.** `git push` with `--no-verify`, or any abbreviation from `--no-veri` up, in any position, is blocked whatever the target. `git commit --no-verify` is not affected: it doesn't skip pre-push.
@@ -46,6 +46,15 @@ Add a second, independent layer against pushes to `main`: a versioned Git `pre-p
 7. **Guard rule E: no deleting or moving the hook.** `rm`, `mv`, `cp` onto, `chmod`, `git rm`, `git mv`, `Remove-Item`/`Move-Item`/`Copy-Item`/`Set-Content`/`Out-File`/`Add-Content` targeting `.githooks` or `.githooks/pre-push` are blocked.
 8. **Permission deny rules** in both `settings.json` files: `Edit(/.githooks/**)` and `Edit(/.git/config)`. This stops Claude's file tools, and Bash `tee`/`>` writes, from editing the hook or repointing `core.hooksPath` in the git config. Check the exact path syntax against the current permissions docs while implementing, and keep it in the config test.
 9. **AGENTS.md hard rules** (template) get one line: agents must never skip or disable Git hooks (`--no-verify`, changing `core.hooksPath`, editing `.githooks/`).
+10. **Guard rule F: no writing `main` or merging through the GitHub API** (owner, 2026-11-21). These `gh api` calls are blocked:
+    - a write (PATCH/POST/PUT/DELETE) to `git/refs/heads/main`
+    - creating `refs/heads/main` through a POST to `git/refs`
+    - a pull request merge endpoint (`pulls/<n>/merge`)
+    - other routes that write `main`: a POST to `merges` with base `main`; PUT/DELETE on `contents/…` with branch `main` or no branch (which means the default branch); writes under `branches/main/…`, including removing branch protection; POST to `merge-upstream` for `main`
+    - GraphQL mutations that merge or move refs: `mergePullRequest`, `mergeBranch`, `enablePullRequestAutoMerge`, `updateRef(s)`, `createRef`, `deleteRef`
+    - `gh pr merge`, which calls the merge endpoint, in any flag order (today only the prefix deny rule `Bash(gh pr merge:*)` covers it)
+
+    The method follows `gh` itself: `-X/--method` if given, otherwise POST when fields (`-f/-F/--raw-field/--field`) or `--input` are present, otherwise GET. Endpoints are matched with or without a leading `/`, as full `https://api.github.com/…` URLs, with `{owner}/{repo}` placeholders, URL-decoded, and case-insensitively for `main`. Read-only calls stay allowed.
 
 ## Acceptance criteria
 
@@ -72,16 +81,37 @@ Add a second, independent layer against pushes to `main`: a versioned Git `pre-p
   - `git push --verbose origin agent/x`
   - `cat .githooks/pre-push`
 - [ ] The config tests also check: both `Edit(...)` deny rules are present, and the hook template copy matches. The `core.hooksPath` check reports SKIP rather than FAIL when it isn't set (CI clones).
+- [ ] Guard rule F tests:
+  - must-block:
+    - `gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=…`
+    - `gh api --method DELETE repos/{owner}/{repo}/git/refs/heads/main`
+    - `gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=…` (implicit POST)
+    - `gh api -X PUT repos/o/r/pulls/3/merge`, `gh api --method=PUT /repos/o/r/pulls/3/merge -f merge_method=squash`
+    - `gh api -XPOST repos/o/r/merges -f base=main -f head=x`
+    - `gh api -X PUT repos/o/r/contents/f -f message=m -f content=… -f branch=main`, and the same with no branch
+    - `gh api -X DELETE repos/o/r/branches/main/protection`
+    - a full `https://api.github.com/…/git/refs/heads/main` PATCH
+    - GraphQL `mergePullRequest` and `updateRef` mutations
+    - `gh pr merge 3 --squash`, `gh pr merge -R o/r 3`
+    - one PowerShell case
+  - must-allow:
+    - GETs of `git/refs/heads/main` (implicit and `-X GET`) and of `pulls/3/merge`
+    - `gh api repos/o/r/pulls --paginate`
+    - a GraphQL `query { … mergeable … }`
+    - a PATCH to `git/refs/heads/agent/claude/x`
+    - a contents PUT with `branch=agent/claude/x`
+    - `gh pr create …`, `gh pr view 3`
+- [ ] `.gitattributes` keeps `.githooks/*` LF in this repo and in `templates/`.
 - [ ] Every existing guard test passes, including GUARD-2's.
 - [ ] Codex review with no unresolved P1/P2 or high findings. Rejecting one needs owner sign-off before the PR (new AGENTS.md rule).
 
 ## Plan
 
-Needs user approval before implementation (risk:security).
+Needs user approval before implementation (risk:security). **Approved by the owner on 2026-11-21**, with two decisions: keep rule A (block pushes while the hook exists but `core.hooksPath` isn't `.githooks`), and add rule F (GitHub API writes to `main` and merges). Any further change to the design or scope goes back for approval.
 
 1. Write the hook's end-to-end test and the guard tests first (TDD), and confirm they fail.
 2. Write `.githooks/pre-push`, set the exec bit (`git update-index --chmod=+x`), and set `core.hooksPath` in this repo. Get the end-to-end test passing.
-3. Add guard rules B and C inside `checkGit`/`checkPush` (option and env scan), rule D as a `git config` check, rule E as a small path check for the file commands listed, and rule A as a `git config --get core.hooksPath` lookup before the push checks.
+3. Add guard rules B and C inside `checkGit`/`checkPush` (option and env scan), rule D as a `git config` check, rule E as a small path check for the file commands listed, rule A as a `git config --get core.hooksPath` lookup before the push checks, and rule F as a `gh` check (an `api` argument parser plus `pr merge`).
 4. Add the deny rules to both `settings.json` files, and update the README and `templates/AGENTS.md`. Copy everything to `templates/`.
 5. Run the full suites and check live in this session: a dry-run push with `--no-verify` is blocked by the guard, and a real push of a throwaway ref to a local bare remote is rejected by the hook.
 6. Codex review, recorded in `.collab/reviews/GUARD-4-r1.md`. Open the PR. The merge is a human gate.
@@ -90,5 +120,5 @@ Needs user approval before implementation (risk:security).
 
 - **Server-side protection.** GitHub branch protection or rulesets on `main` (require a PR, block force-pushes and deletion) is the only layer an agent can't bypass locally. The owner sets it in GitHub; the README and PR recommend it, but this task changes no repo settings.
 - **Firmware upload/flash routes.** The pre-push hook only covers git; uploads stay with the guard (GUARD-5, GUARD-3).
-- **Pushes that don't run local hooks**, e.g. the GitHub API or `gh api` writing refs directly. Server-side protection covers those.
+- **Pushes that don't run local hooks, beyond rule F's `gh` coverage**: direct `curl` calls to the GitHub API, other API clients, `gh api` requests whose body comes from a file or stdin (`--input`, `-F field=@file`), and repository rulesets. Server-side protection covers those.
 - **A determined bypass through a script that edits `.git/config` or the hook itself.** The guard and deny rules block the obvious commands; the guard "catches mistakes; it is not a sandbox".
