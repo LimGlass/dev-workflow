@@ -1,7 +1,7 @@
 ---
 id: GUARD-2            # Linear issue ID, e.g. NOVA-12
 title: "Guard: text-only heredocs stop false positives; text fed to any other command is checked"
-status: plan-review    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+status: ready          # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-2
@@ -129,7 +129,7 @@ The allowlist is matched exactly, including the `-` stdin argument. A bare `gh` 
 
 ## Plan
 
-Needs user approval before implementation (risk:security).
+Needs user approval before implementation (risk:security). **Approved by the owner on 2026-11-21** (revision `ba7d378`, after plan review r1). Any change to the design or scope during implementation goes back for approval.
 
 1. Write the tests above first (TDD). Confirm the must-allow false positives fail today, and that the must-block cases currently allowed (python/node/perl/ruby heredocs, here-strings, piped literals) fail today too.
 2. Tokenizer (bash): recognise `<<`, `<<-` and `<<<` outside quotes. For heredocs, parse the delimiter word, record whether it's quoted, and at the next newline consume the body up to the delimiter line (stripping tabs for `<<-`). For unquoted bodies, extract `$(...)`/backtick substitutions into `subs`. Attach `{ kind, text, quoted }` stdin sources to the segment. An unterminated body throws `ParseError`.
