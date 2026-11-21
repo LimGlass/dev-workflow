@@ -149,6 +149,9 @@ const BLOCK = [
   { group: 'heredoc', cmd: 'sh -s <<"EOF"\npio run -t upload\nEOF', reason: /target "upload"/ },
   { group: 'heredoc', cmd: 'bash <<EOF\ngit push -f origin main\nEOF', reason: /updates main/ },
   { group: 'heredoc', cmd: 'cat <<\'EOF\' | bash\ngit push origin main\nEOF', reason: /updates main/ },
+  // quoting the delimiter only stops the outer shell expanding; a shell consumer still runs $(...)
+  { group: 'heredoc', cmd: 'bash <<\'EOF\'\necho $(git push origin main)\nEOF', reason: /updates main/ },
+  { group: 'heredoc', cmd: 'sh <<"EOF"\nx=`pio run -t upload`\nEOF', reason: /target "upload"/ },
   { group: 'here-string', cmd: "bash <<< 'git push origin main'", reason: /updates main/ },
   { group: 'here-string', cmd: 'python <<< \'import os; os.system("git push origin main")\'' },
   { group: 'piped', cmd: "printf 'git push origin main\\n' | bash", reason: /updates main/ },
