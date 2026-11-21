@@ -33,6 +33,7 @@ These are human gates. When a task reaches one, set the task status to `human-ga
 - Codex reviews run through `/codex:review` or `/codex:adversarial-review` (read-only).
 - For `risk:hardware` and `risk:security` tasks, the written plan is saved in the task file and may get a Codex plan review before implementation; the user approves the plan before work starts.
 - Record each review in `.collab/reviews/` and respond to every finding in its table.
+- Rejecting a P1 or high-severity review finding on a `risk:security` or `risk:hardware` task needs owner sign-off before the PR is opened.
 
 ## Collaboration files (`.collab/`)
 
