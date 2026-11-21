@@ -13,6 +13,11 @@ Implementation review. Codex `/codex:review --base main` of branch `agent/claude
 |---|----------|-----------|---------|----------------------|
 | 1 | P1 | .claude/hooks/guard.js:117 | `scanHeredocBody` skips `$(...)`/backtick checks for quoted heredocs. So `bash <<'EOF'` containing `$(git push origin main)` would supposedly reach `analyze` as inert text and not be blocked. Suggested: check substitutions in heredoc bodies regardless of quoting when the consumer runs the body. | **Rejected. No code change; regression tests added (`d0e92c1`).** The described bypass doesn't happen. `scanHeredocBody` only extracts substitutions the *outer* shell would expand, which correctly excludes quoted bodies. When the consumer is a shell, `checkStdin` sends the body to `analyze()`, which tokenizes it again as a script. The `$(...)` and backticks are extracted and checked there, whatever the delimiter quoting. Verified with `check()` on 2026-11-21. All of these are **blocked**: `bash <<'EOF'` with `$(git push origin main)`, with `echo $(git push origin main)`, with `` echo `git push origin HEAD:main` ``, and with `echo "$(git push origin main)"`; `sh <<"EOF"` with `` x=$(pio run -t upload) ``; and `printf '$(git push origin main)' \| bash`. `bash <<'EOF'` with `echo $(git status)` is allowed, as intended. The cited line 117 is the `tokenize` doc comment, not the code path described. Two of these cases are now permanent must-block tests (suite: 170 passed, 0 failed). |
 
+## Owner sign-off
+
+- **Finding 1 (P1) rejection: signed off by the owner on 2026-11-21**, before PR #3 was merged (merge commit `737fb33`).
+- Timing: PR #3 was opened before the rule "Rejecting a P1 or high-severity review finding on a risk:security or risk:hardware task needs owner sign-off before the PR is opened" existed (added to `templates/AGENTS.md` on 2026-11-21). The sign-off was therefore given after the PR was opened but before the merge.
+
 ## Pilot measures
 
 - Findings raised: 1
