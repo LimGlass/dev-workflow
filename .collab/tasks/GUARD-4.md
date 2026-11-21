@@ -1,7 +1,7 @@
 ---
 id: GUARD-4            # Linear issue ID, e.g. NOVA-12
-title: "Versioned Git pre-push hook rejecting pushes to main, plus a guard rule against --no-verify"
-status: draft          # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+title: "Versioned Git pre-push hook rejecting pushes to main, plus guard rules against skipping or disabling it"
+status: plan-review    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-4
@@ -11,60 +11,84 @@ human_gates: [plan-approval, merge]        # e.g. [plan-approval, merge, firmwar
 
 ## Goal
 
-Add a second, independent layer against pushes to `main`. This is a versioned Git `pre-push` hook, enabled through `core.hooksPath` and copied into `templates/`. Git itself runs it on every push, so it rejects any update of `refs/heads/main` no matter how git was invoked: scripts, aliases, `bash -c`, interpreters, stdin tricks, or anything else `.claude/hooks/guard.js` can't see. The Claude guard gets a matching rule that blocks the ways to skip or disable that hook (`git push --no-verify` and its equivalents).
+Add a second, independent layer against pushes to `main`: a versioned Git `pre-push` hook. Git itself runs it on every push, so it rejects any update of `refs/heads/main` however git was invoked. That covers scripts, aliases, interpreters, stdin tricks, and the parser gaps `.claude/hooks/guard.js` can't see (such as GUARD-5's early-close bypass). The Claude guard gets matching rules so an agent can't skip, repoint or delete that hook, and so the hook must be active before any push.
 
 ## Context and links
 
 - ADR-0001: agents never push to main or write firmware to a board. `main` changes only through user-merged pull requests.
-- `.claude/hooks/guard.js` parses command text, so by design it can't see pushes made from inside scripts, git aliases, or programs whose code isn't visible in the command. Its header says: "This catches mistakes; it is not a sandbox. Scripts, aliases and git aliases are not inspected."
-- GUARD-2 closes stdin/heredoc/pipe routes. GUARD-3 closes `node -e`/`perl -e`/`ruby -e`. Both are text-parsing fixes. A pre-push hook covers every push route at once, which is why GUARD-4 is sequenced **before GUARD-3** (owner's decision, 2026-11-21).
-- Sequencing: GUARD-2 → **GUARD-4** → GUARD-3. GUARD-4 edits `guard.js` (the `--no-verify` rule), so cut its implementation branch from `main` after GUARD-2 merges.
-- Today: `core.hooksPath` is unset in this repo, there are no non-sample hooks in `.git/hooks`, and nothing in the repo mentions `--no-verify` or `hooksPath`.
+- `guard.js` parses command text, so it can't see pushes from inside scripts, git aliases, or code it can't read. Its header says: "This catches mistakes; it is not a sandbox."
+- **Sequencing (owner, 2026-11-21):** GUARD-2 (merged as PR #3) → **GUARD-4** → GUARD-5 → GUARD-3. GUARD-4 comes first because it covers every push route at once. This branch is cut fresh from `main` after PR #3 merged.
+- This branch also carries two process changes made on 2026-11-21, kept as separate commits:
+  - the `templates/AGENTS.md` rule "Rejecting a P1 or high-severity review finding on a risk:security or risk:hardware task needs owner sign-off before the PR is opened"
+  - the owner's sign-off on the GUARD-2 r1 P1 rejection, recorded in `.collab/reviews/GUARD-2-r1.md`
+- Today: `core.hooksPath` is unset in this repo, `.git/hooks` has only samples, and nothing mentions `--no-verify` or `hooksPath`. The guard hook only sees the **Bash and PowerShell** tools (`matcher: "Bash|PowerShell"`), so Claude's Edit/Write tools are covered only by permission rules.
 - Git facts the design depends on:
-  - `pre-push` receives `<local ref> <local sha> <remote ref> <remote sha>` lines on stdin, one per ref being updated. A non-zero exit aborts the whole push.
-  - It is skipped by `git push --no-verify` (also `--no-verify` placed before the remote) and by any setting that points `core.hooksPath` elsewhere, e.g. `git -c core.hooksPath=/dev/null push`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, or `git config core.hooksPath …`.
-  - `core.hooksPath` is local config, not versioned, so each clone has to set it.
+  - `pre-push` gets the remote name and URL as `$1`/`$2`, and one line per ref on stdin: `<local ref> <local sha> <remote ref> <remote sha>`. A delete has local ref `(delete)` and an all-zero sha. A non-zero exit aborts the whole push.
+  - It is skipped by `git push --no-verify`. Git accepts unambiguous abbreviations of long options, so `--no-veri`, `--no-verif` and so on also skip it. (`--no-ver` is ambiguous with `--no-verbose` and fails.)
+  - Ways to repoint `core.hooksPath` for one command: `git -c core.hooksPath=…`, `git --config-env=core.hooksPath=VAR`, `GIT_CONFIG_PARAMETERS`, or `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`. Persistently: `git config [--local|--global|--system|--worktree|--file …] core.hooksPath …`, `git config --unset[-all] core.hooksPath`, or the newer `git config set|unset …`. Config keys are case-insensitive (`core.hookspath`).
+  - `core.hooksPath` is local config, not versioned, so every clone must set it.
+  - Claude Code permission rules: `Edit(path)` deny rules cover Edit, Write and NotebookEdit, and also Bash writes through `tee` and `>` redirection. They don't stop `rm`/`mv` or scripts. `Write(path)` rules never match. (code.claude.com/docs/en/permissions, checked via Context7 on 2026-11-21.)
+
+## Design
+
+1. **The hook: `.githooks/pre-push`**, POSIX `sh` with no dependencies. It runs under Git for Windows' bundled sh and on macOS/Linux. It reads every stdin line and rejects if any remote ref equals `refs/heads/main`, compared case-insensitively to match the guard. That includes creates, updates, force-updates and deletes. It prints an ADR-0001 message naming the remote and exits 1 after reading all lines, so every offending ref is reported. Committed with mode `100755`.
+2. **Activation.** This repo sets `git config core.hooksPath .githooks`. The README setup steps add the same command for new projects, and `templates/.githooks/pre-push` is a byte-identical copy.
+3. **Guard rule A: the hook must be active.** If the repository being pushed from contains `.githooks/pre-push` and its effective `core.hooksPath` (read with the same `-C`/`-c` options as the push) is not `.githooks`, `git push` is blocked with the one-line fix. Repos without the hook file are unaffected. **This is a decision for you:** it adds friction on fresh clones until the hook is enabled, but without it the hook protects nothing until someone remembers to set it.
+4. **Guard rule B: no skipping.** `git push` with `--no-verify`, or any abbreviation from `--no-veri` up, in any position, is blocked whatever the target. `git commit --no-verify` is not affected: it doesn't skip pre-push.
+5. **Guard rule C: no repointing for a push.** A `git push` is blocked when its own command sets `core.hooksPath` through `-c` or `--config-env`, or is preceded by `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*` assignments. That covers inline `VAR=…`, `env VAR=…`, `export VAR=…` earlier on the same line, and PowerShell `$env:GIT_CONFIG_* = …`.
+6. **Guard rule D: no persistent changes.** These are blocked:
+   - `git config … core.hooksPath <value>` with any value other than `.githooks`, in any scope
+   - `--unset`/`--unset-all` of it
+   - `git config set|unset core.hooksPath …`
+   - writing the key with `--file` or `-f`
+
+   Setting it to `.githooks` is allowed. Reading it (`--get`, `--list`) is allowed.
+7. **Guard rule E: no deleting or moving the hook.** `rm`, `mv`, `cp` onto, `chmod`, `git rm`, `git mv`, `Remove-Item`/`Move-Item`/`Copy-Item`/`Set-Content`/`Out-File`/`Add-Content` targeting `.githooks` or `.githooks/pre-push` are blocked.
+8. **Permission deny rules** in both `settings.json` files: `Edit(/.githooks/**)` and `Edit(/.git/config)`. This stops Claude's file tools, and Bash `tee`/`>` writes, from editing the hook or repointing `core.hooksPath` in the git config. Check the exact path syntax against the current permissions docs while implementing, and keep it in the config test.
+9. **AGENTS.md hard rules** (template) get one line: agents must never skip or disable Git hooks (`--no-verify`, changing `core.hooksPath`, editing `.githooks/`).
 
 ## Acceptance criteria
 
-- [ ] A versioned hook at `.githooks/pre-push` (and `templates/.githooks/pre-push`, byte-identical). It reads the stdin ref lines and exits non-zero with an ADR-0001 message if any **remote ref** is `refs/heads/main`. That includes creates, updates, force-updates and deletes (a delete has a local sha of all zeros), for any remote name or URL.
-- [ ] The hook allows pushes to every other ref (e.g. `refs/heads/agent/claude/x`, tags).
-- [ ] The hook runs on Windows (Git for Windows' bundled sh) as well as macOS/Linux. It needs nothing beyond what the repo already needs (Node.js is already required by the guard, or plain POSIX sh).
-- [ ] This repo sets `core.hooksPath=.githooks`, and the README's "Using the templates in a project" steps tell new projects to run `git config core.hooksPath .githooks`.
-- [ ] New guard rule in `.claude/hooks/guard.js`: block `git push` with `--no-verify`, in any position and combined with any other flags, whatever the target branch. The block message explains that the pre-push hook must not be skipped.
-- [ ] New guard rule: block attempts to bypass or repoint the hook. This covers:
-  - `git -c core.hooksPath=… push`
-  - `git config [--local|--global|--system|--worktree] core.hooksPath <anything other than .githooks>`
-  - `git config --unset core.hooksPath`
-  - `GIT_CONFIG_PARAMETERS=…` / `GIT_CONFIG_COUNT=…` env assignments in front of a git push
-  - edits or deletion of `.githooks/pre-push` through shell commands (`rm`, `mv`, redirect, `chmod -x`)
+- [ ] `.githooks/pre-push` exists, is POSIX sh, has mode `100755`, and is byte-identical to `templates/.githooks/pre-push`.
+- [ ] **End-to-end hook test**, `.githooks/pre-push.test.js` (Node). It runs real `git` in temp repos with a local bare remote and `core.hooksPath` pointing at this hook:
+  - rejected: `HEAD:main`; force `+HEAD:main`; `--delete main`; `main` pushed together with `agent/x`; `HEAD:refs/heads/main`; `HEAD:MAIN`
+  - accepted: `HEAD:agent/claude/x`, tags, deleting `agent/x`
+  - the rejection message names ADR-0001
 
-  Each case gets must-block tests. Matching is case-insensitive where git is (`core.hookspath`).
-- [ ] Tests for the hook itself, a new `.githooks/pre-push.test.js` (or equivalent) that pipes sample ref lines in:
-  - must-reject: an update of main, a force-update of main, a delete of main, and main among several refs
-  - must-accept: agent branches and tags
-- [ ] Guard tests in `guard.test.js` for all new rules, plus must-allow cases: a plain `git push origin agent/claude/x`, `git config core.hooksPath .githooks`, and `git log --no-verify`-style flags on other subcommands.
-- [ ] `templates/` copies stay byte-identical (the guard test already checks guard.js; extend the check to the hook).
-- [ ] An end-to-end check in a throwaway repo with a local bare remote:
-  - `git push origin HEAD:main` is rejected by the hook.
-  - `git push origin HEAD:agent/x` succeeds.
-  - Both run outside Claude Code, i.e. without the guard.
-- [ ] Codex review with no unresolved P1/P2 or high findings.
+  It runs on Windows (Git for Windows) and on POSIX.
+- [ ] This repo has `core.hooksPath=.githooks`. The README setup step and layout block are updated, and the README recommends GitHub branch protection.
+- [ ] Guard rules A–E are implemented in `guard.js`, with the `templates/` copy byte-identical.
+- [ ] Guard tests, must-block:
+  - A: `git push origin agent/x` in a temp repo that has `.githooks/pre-push` but no `core.hooksPath`
+  - B: `git push --no-verify origin agent/x`, `git push origin agent/x --no-verify`, `git push --no-verif origin agent/x`, and in PowerShell
+  - C: `git -c core.hooksPath=/dev/null push origin agent/x`, `git -c core.hookspath=x push`, `git --config-env=core.hooksPath=H push`, `GIT_CONFIG_PARAMETERS="'core.hooksPath=x'" git push`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=x git push`, `export GIT_CONFIG_PARAMETERS=…; git push`, PowerShell `$env:GIT_CONFIG_PARAMETERS="…"; git push`
+  - D: `git config core.hooksPath /dev/null`, `git config --global core.hooksPath x`, `git config --unset core.hooksPath`, `git config unset core.hooksPath`, `git config set core.hooksPath x`, `git config --file .git/config core.hooksPath x`
+  - E: `rm .githooks/pre-push`, `rm -rf .githooks`, `mv .githooks/pre-push x`, `chmod -x .githooks/pre-push`, `git rm .githooks/pre-push`, PowerShell `Remove-Item .githooks/pre-push`
+- [ ] Guard tests, must-allow:
+  - `git push origin agent/claude/x` in a repo with the hook active
+  - `git push` in a repo with no `.githooks/pre-push`
+  - `git config core.hooksPath .githooks`, `git config --get core.hooksPath`
+  - `git commit --no-verify -m wip`
+  - `git push --verbose origin agent/x`
+  - `cat .githooks/pre-push`
+- [ ] The config tests also check: both `Edit(...)` deny rules are present, and the hook template copy matches. The `core.hooksPath` check reports SKIP rather than FAIL when it isn't set (CI clones).
+- [ ] Every existing guard test passes, including GUARD-2's.
+- [ ] Codex review with no unresolved P1/P2 or high findings. Rejecting one needs owner sign-off before the PR (new AGENTS.md rule).
 
 ## Plan
 
 Needs user approval before implementation (risk:security).
 
-1. Write the hook tests and guard tests first (TDD) and confirm they fail.
-2. Implement `.githooks/pre-push`. Prefer a small POSIX sh script with no dependencies, or a Node script with a sh shim if parsing is clearer. Decide during plan review.
-3. Add the guard rules: a `--no-verify` check inside `checkPush`; a `core.hooksPath` check for `git -c`, `git config` and env assignments; protection for the hook file.
-4. Set `core.hooksPath` in this repo, update the README steps and layout block, and copy to `templates/`.
-5. Run the end-to-end check in a temp repo with a bare remote. Run the full test suites.
+1. Write the hook's end-to-end test and the guard tests first (TDD), and confirm they fail.
+2. Write `.githooks/pre-push`, set the exec bit (`git update-index --chmod=+x`), and set `core.hooksPath` in this repo. Get the end-to-end test passing.
+3. Add guard rules B and C inside `checkGit`/`checkPush` (option and env scan), rule D as a `git config` check, rule E as a small path check for the file commands listed, and rule A as a `git config --get core.hooksPath` lookup before the push checks.
+4. Add the deny rules to both `settings.json` files, and update the README and `templates/AGENTS.md`. Copy everything to `templates/`.
+5. Run the full suites and check live in this session: a dry-run push with `--no-verify` is blocked by the guard, and a real push of a throwaway ref to a local bare remote is rejected by the hook.
 6. Codex review, recorded in `.collab/reviews/GUARD-4-r1.md`. Open the PR. The merge is a human gate.
 
 ## Out of scope
 
-- **Server-side protection.** GitHub branch protection or rulesets on `main` (require a PR, block force-pushes) is the only layer an agent can't bypass locally. The owner sets it in GitHub; recommend it in the PR, but this task doesn't change repo settings.
-- Firmware upload/flash routes. The pre-push hook only covers git; upload/flash coverage stays with the guard.
-- Pushes made by tools that don't run git hooks (e.g. the GitHub API or `gh api` writing refs directly). Server-side protection covers those.
-- Making `core.hooksPath` impossible to change. The guard blocks the obvious commands, but a determined bypass through a script is out of scope ("catches mistakes; it is not a sandbox").
+- **Server-side protection.** GitHub branch protection or rulesets on `main` (require a PR, block force-pushes and deletion) is the only layer an agent can't bypass locally. The owner sets it in GitHub; the README and PR recommend it, but this task changes no repo settings.
+- **Firmware upload/flash routes.** The pre-push hook only covers git; uploads stay with the guard (GUARD-5, GUARD-3).
+- **Pushes that don't run local hooks**, e.g. the GitHub API or `gh api` writing refs directly. Server-side protection covers those.
+- **A determined bypass through a script that edits `.git/config` or the hook itself.** The guard and deny rules block the obvious commands; the guard "catches mistakes; it is not a sandbox".
