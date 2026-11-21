@@ -21,7 +21,7 @@ Treat inline code passed to interpreters other than Python the way `python -c` i
   - `python -c 'import os; os.system("git push origin main")'` → BLOCKED (`checkPython`, guard.js:541-543: a RISKY scan of the `-c` code)
 - Cause: `checkCommand` (guard.js:401-419) has no branch for `node`, `perl` or `ruby`, so they return `null`.
 - GUARD-2 handles code sent to these interpreters through **stdin** (heredocs, here-strings, pipes). This task covers code passed as an **argument**. GUARD-2 listed it as out of scope.
-- Sequencing: GUARD-2 → GUARD-4 → **GUARD-3** (owner's decision, 2026-11-21). GUARD-4's pre-push hook already stops pushes to main from any route, including these. That leaves GUARD-3 mainly to catch firmware uploads launched from inline code and to fail earlier with a clearer message. Cut the branch from `main` after GUARD-2 (and ideally GUARD-4) merge, since all three edit `guard.js`.
+- Sequencing: GUARD-2 (merged) → GUARD-4 → GUARD-5 → **GUARD-3** (owner's decision, 2026-11-21). GUARD-4's pre-push hook already stops pushes to main from any route, including these. That leaves GUARD-3 mainly to catch firmware uploads launched from inline code and to fail earlier with a clearer message. All of them change `guard.js`, so cut this branch fresh from `main` after GUARD-5 merges.
 - Policy: ADR-0001.
 
 ## Acceptance criteria
