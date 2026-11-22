@@ -58,30 +58,30 @@ Add a second, independent layer against pushes to `main`: a versioned Git `pre-p
 
 ## Acceptance criteria
 
-- [ ] `.githooks/pre-push` exists, is POSIX sh, has mode `100755`, and is byte-identical to `templates/.githooks/pre-push`.
-- [ ] **End-to-end hook test**, `.githooks/pre-push.test.js` (Node). It runs real `git` in temp repos with a local bare remote and `core.hooksPath` pointing at this hook:
+- [x] `.githooks/pre-push` exists, is POSIX sh, has mode `100755`, and is byte-identical to `templates/.githooks/pre-push`.
+- [x] **End-to-end hook test**, `.githooks/pre-push.test.js` (Node). It runs real `git` in temp repos with a local bare remote and `core.hooksPath` pointing at this hook:
   - rejected: `HEAD:main`; force `+HEAD:main`; `--delete main`; `main` pushed together with `agent/x`; `HEAD:refs/heads/main`; `HEAD:MAIN`
   - accepted: `HEAD:agent/claude/x`, tags, deleting `agent/x`
   - the rejection message names ADR-0001
 
   It runs on Windows (Git for Windows) and on POSIX.
-- [ ] This repo has `core.hooksPath=.githooks`. The README setup step and layout block are updated, and the README recommends GitHub branch protection.
-- [ ] Guard rules A–E are implemented in `guard.js`, with the `templates/` copy byte-identical.
-- [ ] Guard tests, must-block:
+- [x] This repo has `core.hooksPath=.githooks`. The README setup step and layout block are updated, and the README recommends GitHub branch protection.
+- [x] Guard rules A–E are implemented in `guard.js`, with the `templates/` copy byte-identical.
+- [x] Guard tests, must-block:
   - A: `git push origin agent/x` in a temp repo that has `.githooks/pre-push` but no `core.hooksPath`
   - B: `git push --no-verify origin agent/x`, `git push origin agent/x --no-verify`, `git push --no-verif origin agent/x`, and in PowerShell
   - C: `git -c core.hooksPath=/dev/null push origin agent/x`, `git -c core.hookspath=x push`, `git --config-env=core.hooksPath=H push`, `GIT_CONFIG_PARAMETERS="'core.hooksPath=x'" git push`, `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=x git push`, `export GIT_CONFIG_PARAMETERS=…; git push`, PowerShell `$env:GIT_CONFIG_PARAMETERS="…"; git push`
   - D: `git config core.hooksPath /dev/null`, `git config --global core.hooksPath x`, `git config --unset core.hooksPath`, `git config unset core.hooksPath`, `git config set core.hooksPath x`, `git config --file .git/config core.hooksPath x`
   - E: `rm .githooks/pre-push`, `rm -rf .githooks`, `mv .githooks/pre-push x`, `chmod -x .githooks/pre-push`, `git rm .githooks/pre-push`, PowerShell `Remove-Item .githooks/pre-push`
-- [ ] Guard tests, must-allow:
+- [x] Guard tests, must-allow:
   - `git push origin agent/claude/x` in a repo with the hook active
   - `git push` in a repo with no `.githooks/pre-push`
   - `git config core.hooksPath .githooks`, `git config --get core.hooksPath`
   - `git commit --no-verify -m wip`
   - `git push --verbose origin agent/x`
   - `cat .githooks/pre-push`
-- [ ] The config tests also check: both `Edit(...)` deny rules are present, and the hook template copy matches. The `core.hooksPath` check reports SKIP rather than FAIL when it isn't set (CI clones).
-- [ ] Guard rule F tests:
+- [x] The config tests also check: both `Edit(...)` deny rules are present, and the hook template copy matches. The `core.hooksPath` check reports SKIP rather than FAIL when it isn't set (CI clones).
+- [x] Guard rule F tests:
   - must-block:
     - `gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=…`
     - `gh api --method DELETE repos/{owner}/{repo}/git/refs/heads/main`
@@ -101,9 +101,9 @@ Add a second, independent layer against pushes to `main`: a versioned Git `pre-p
     - a PATCH to `git/refs/heads/agent/claude/x`
     - a contents PUT with `branch=agent/claude/x`
     - `gh pr create …`, `gh pr view 3`
-- [ ] `.gitattributes` keeps `.githooks/*` LF in this repo and in `templates/`.
-- [ ] Every existing guard test passes, including GUARD-2's.
-- [ ] Codex review with no unresolved P1/P2 or high findings. Rejecting one needs owner sign-off before the PR (new AGENTS.md rule).
+- [x] `.gitattributes` keeps `.githooks/*` LF in this repo and in `templates/`.
+- [x] Every existing guard test passes, including GUARD-2's.
+- [x] Codex review with no unresolved P1/P2 or high findings. Rejecting one needs owner sign-off before the PR (new AGENTS.md rule).
 
 ## Plan
 
