@@ -9,7 +9,7 @@ risk: security         # low | normal | hardware | security  (Linear labels risk
 human_gates: [plan-approval, merge]        # e.g. [plan-approval, merge, firmware-flash, hardware-change]
 ---
 
-> **Backlog** (owner, 2026-11-22): not scheduled. The next piece of work is the collab-sandbox pilot. Before picking this up again, cut the branch fresh from `main` (it is based on the pre-GUARD-2 main) and re-check the probes against the current guard.
+> **Backlog** (owner, 2026-11-22): not scheduled. The next piece of work is the collab-sandbox pilot. **This branch must be rebased onto `main` before work starts.** It is based on the pre-GUARD-2 main, so its `guard.js` and tests are out of date. After rebasing, re-check the probes against the current guard. (Branch pushed to origin for safekeeping on 2026-11-22, with no PR.)
 
 ## Goal
 
