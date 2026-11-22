@@ -9,6 +9,8 @@ risk: security         # low | normal | hardware | security  (Linear labels risk
 human_gates: [plan-approval, merge]        # e.g. [plan-approval, merge, firmware-flash, hardware-change]
 ---
 
+> **Backlog** (owner, 2026-11-22): not scheduled. The next piece of work is the collab-sandbox pilot. Before picking this up again, cut the branch fresh from `main` (it is based on the pre-GUARD-2 main) and re-check the probes against the current guard.
+
 ## Goal
 
 Treat inline code passed to interpreters other than Python the way `python -c` is already treated. Block when the code mentions a guarded operation, so `node -e "…git push origin main…"` can no longer slip past `.claude/hooks/guard.js`.
