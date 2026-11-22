@@ -9,6 +9,8 @@ risk: security         # low | normal | hardware | security  (Linear labels risk
 human_gates: [plan-approval, merge]        # e.g. [plan-approval, merge, firmware-flash, hardware-change]
 ---
 
+> **Backlog** (owner, 2026-11-22): not scheduled. The next piece of work is the collab-sandbox pilot. Before picking this up again, cut the branch fresh from `main` (it is based on the pre-GUARD-2 main) and re-check the probes against the current guard.
+
 ## Goal
 
 Make `matchParen` in `.claude/hooks/guard.js` find the real end of a `$( … )` substitution when it contains a heredoc. This fixes two problems with the same cause:
