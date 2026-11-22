@@ -36,6 +36,7 @@
 'use strict';
 
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
@@ -539,7 +540,14 @@ function stripWrappers(words) {
 
 // stdin: text known to reach this command's stdin (heredoc, here-string or
 // piped literal), or null when there is none or it cannot be known.
+// GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n,
+// or swapping the config files read (GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM), set by
+// bash assignment, env, export, or PowerShell $env:, can repoint core.hooksPath.
+const GIT_CONFIG_ENV = /^(\$env:)?GIT_CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+|GLOBAL|SYSTEM)(=|$)/i;
+
 function checkSegment(words, ctx, depth, stdin = null) {
+  // Remembered for the rest of the command: a later git push in it is blocked.
+  if (words.some((x) => GIT_CONFIG_ENV.test(x))) ctx.gitConfigEnv = true;
   const { words: w, uncertain } = stripWrappers(words);
   const where = show(words.join(' ') || '(group)');
   const wrap = (r) => {
@@ -677,6 +685,8 @@ function checkCommand(name, args, ctx, depth, uncertain) {
   if (name === 'eval') return analyzeJoined(args, { ...ctx, dialect: 'bash' }, depth);
   if (name === 'start-process' || name === 'saps' || name === 'start') return checkStart(args, ctx, depth);
   if (name === 'git') return checkGit(args, ctx, uncertain);
+  if (name === 'gh') return checkGh(args);
+  if (FILE_COMMANDS.has(name)) return checkHookFile(name, args, ctx);
   if (name === 'pio' || name === 'platformio') return checkPio(args, ctx, uncertain);
   if (name === 'esptool' || name === 'esptool.py') return 'esptool writes to the chip';
   if (name === 'idf.py' || name === 'idf') return checkIdf(args, ctx, uncertain);
@@ -819,10 +829,13 @@ function checkPython(args, ctx, depth, uncertain) {
 
 const GIT_VALUE_OPTS = ['-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'];
 
+const HOOKS_PATH_KEY = /^core\.hookspath(=|$)/i;
+
 function checkGit(args, ctx, uncertain) {
   const opts = [];
   let cwd = ctx.cwd;
   let unknownLocation = cwd === null;
+  let setsHooksPath = false;
   let i = 0;
   for (; i < args.length; i++) {
     const a = args[i];
@@ -835,17 +848,31 @@ function checkGit(args, ctx, uncertain) {
     if (GIT_VALUE_OPTS.includes(a)) {
       const v = args[++i] || '';
       if (isDynamic(v)) unknownLocation = true;
+      if ((a === '-c' || a === '--config-env') && HOOKS_PATH_KEY.test(v)) setsHooksPath = true;
       opts.push(a, v);
       continue;
     }
+    if (/^--config-env=/i.test(a) && HOOKS_PATH_KEY.test(a.slice('--config-env='.length))) setsHooksPath = true;
     if (a.startsWith('-')) { opts.push(a); continue; }
     break;
   }
   const sub = args[i];
   if (sub === undefined) return null;
   if (isDynamic(sub)) return unsure(ctx, 'the git subcommand is computed at run time');
-  if (sub.toLowerCase() !== 'push') return null;
-  return checkPush(args.slice(i + 1), { ctx, cwd, opts, unknownLocation, uncertain });
+  const rest = args.slice(i + 1);
+  switch (sub.toLowerCase()) {
+    case 'push':
+      if (setsHooksPath) return 'git push sets core.hooksPath on the command line, which would bypass the pre-push hook';
+      if (ctx.gitConfigEnv) return 'GIT_CONFIG_* environment variables can repoint core.hooksPath and bypass the pre-push hook';
+      return checkPush(rest, { ctx, cwd, opts, unknownLocation, uncertain });
+    case 'config':
+      return checkGitConfig(rest);
+    case 'rm':
+    case 'mv':
+      return checkHookFile(`git ${sub.toLowerCase()}`, rest, { ...ctx, cwd: unknownLocation ? null : cwd });
+    default:
+      return null;
+  }
 }
 
 function checkPush(pargs, q) {
@@ -857,6 +884,10 @@ function checkPush(pargs, q) {
     const a = pargs[i];
     if (!endOfOptions && a === '--') { endOfOptions = true; continue; }
     if (!endOfOptions && a.startsWith('-') && a.length > 1) {
+      // git accepts unambiguous abbreviations: --no-veri, --no-verif, --no-verify
+      if (a.length >= '--no-veri'.length && '--no-verify'.startsWith(a)) {
+        return 'git push --no-verify would skip the pre-push hook';
+      }
       if (a === '--repo') { repoOption = true; i++; continue; }
       if (a.startsWith('--repo=')) { repoOption = true; continue; }
       if (['-o', '--push-option', '--receive-pack', '--exec'].includes(a)) { i++; continue; }
@@ -864,6 +895,14 @@ function checkPush(pargs, q) {
       continue;
     }
     positional.push(a);
+  }
+
+  if (q.unknownLocation) {
+    const u = unsure(q.ctx, 'the repository directory is computed at run time, so the pre-push hook cannot be checked');
+    if (u) return u;
+  } else {
+    const inactive = hookInactive(q.cwd, q.opts);
+    if (inactive) return inactive;
   }
 
   if (pushesAll) return 'git push --all/--mirror would update main';
@@ -894,6 +933,199 @@ function checkPush(pargs, q) {
     }
   }
   if (dynamicRefspec) return unsure(q.ctx, `the push target "${show(dynamicRefspec)}" is computed at run time`);
+  return null;
+}
+
+// ------------------------------------------------------ pre-push hook (.githooks)
+
+function normPath(p) {
+  const r = path.resolve(fromMsys(p));
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+
+function samePath(a, b) {
+  return normPath(a) === normPath(b);
+}
+
+// A: a repository that ships .githooks/pre-push must have it enabled before any push.
+function hookInactive(cwd, opts) {
+  const top = git(cwd, [...opts, 'rev-parse', '--show-toplevel']);
+  if (!top) return null; // not a repository; git push will fail on its own
+  const hooksDir = path.join(fromMsys(top), '.githooks');
+  if (!fs.existsSync(path.join(hooksDir, 'pre-push'))) return null;
+  const hooksPath = git(cwd, [...opts, 'config', '--get', 'core.hooksPath']);
+  // A relative core.hooksPath is resolved from the top of the working tree.
+  if (hooksPath && samePath(path.resolve(fromMsys(top), fromMsys(hooksPath)), hooksDir)) return null;
+  return `the pre-push hook in .githooks is not enabled (core.hooksPath is ${hooksPath ? `"${hooksPath}"` : 'unset'}); `
+    + 'run: git config core.hooksPath .githooks';
+}
+
+// D: core.hooksPath may only be read, or set to .githooks.
+function checkGitConfig(args) {
+  const SUBCOMMANDS = ['get', 'set', 'unset', 'list', 'edit', 'rename-section', 'remove-section'];
+  const VALUE_OPTS = ['--file', '-f', '--blob', '--type', '--default', '--comment', '--value'];
+  const GET_OPTS = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--get-color', '--get-colorbool', '-l', '--list'];
+  let action = null; // get | unset | set
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const l = a.toLowerCase();
+    if (VALUE_OPTS.includes(l)) { i++; continue; }
+    if (l === '--unset' || l === '--unset-all') { action = 'unset'; continue; }
+    if (GET_OPTS.includes(l)) { action = action || 'get'; continue; }
+    if (l === '-e' || l === '--edit') return 'git config --edit opens the config in an editor, which could change core.hooksPath';
+    if (l === '--remove-section' || l === '--rename-section') {
+      const section = args[i + 1] || '';
+      if (isDynamic(section) || section.toLowerCase() === 'core') return `git config ${l} ${section} would drop core.hooksPath`;
+      i++;
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) continue;
+    positional.push(a);
+  }
+  if (positional.length && SUBCOMMANDS.includes(positional[0].toLowerCase())) {
+    const sub = positional.shift().toLowerCase();
+    if (sub === 'edit') return 'git config edit opens the config in an editor, which could change core.hooksPath';
+    if (sub === 'remove-section' || sub === 'rename-section') {
+      const section = positional[0] || '';
+      return isDynamic(section) || section.toLowerCase() === 'core' ? `git config ${sub} ${section} would drop core.hooksPath` : null;
+    }
+    action = sub === 'list' ? 'get' : sub;
+  }
+  const key = positional[0];
+  if (key === undefined) return null;
+  if (isDynamic(key)) return action === 'get' ? null : 'the git config key is computed at run time, so it cannot be checked against core.hooksPath';
+  if (key.toLowerCase() !== 'core.hookspath') return null;
+  if (action === 'get') return null;
+  if (action === 'unset') return 'git config would unset core.hooksPath, disabling the pre-push hook';
+  const value = positional[1];
+  if (value === undefined) return null; // old-style read: git config core.hooksPath
+  if (!isDynamic(value) && value.replace(/^\.\//, '').replace(/[\\/]+$/, '') === '.githooks') return null;
+  return `git config would set core.hooksPath to "${show(value)}"; the pre-push hook needs .githooks`;
+}
+
+// E: commands that delete, move, overwrite or change the mode of files.
+const REMOVERS = new Set(['rm', 'rmdir', 'unlink', 'del', 'erase', 'rd', 'remove-item', 'ri', 'git rm']);
+const MOVERS = new Set(['mv', 'move', 'move-item', 'mi', 'rename-item', 'ren', 'rni', 'git mv']);
+const COPIERS = new Set(['cp', 'copy', 'copy-item', 'cpi', 'install']);
+const WRITERS = new Set(['chmod', 'chattr', 'tee', 'truncate', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
+  'clear-content', 'clc', 'new-item', 'ni']);
+const FILE_COMMANDS = new Set([...REMOVERS, ...MOVERS, ...COPIERS, ...WRITERS, 'sed']);
+const PATH_PARAMS = ['-path', '-literalpath', '-destination', '-filepath', '-target', '-t', '--target-directory'];
+
+// Is p (relative to cwd) inside the .githooks directory at the top of a git
+// working tree, or (for recursive removal) a directory that contains one?
+function isHookPath(p, cwd, removing) {
+  if (isDynamic(p)) return /\.githooks/i.test(p);
+  const resolved = resolveDir(cwd, p);
+  if (resolved === null) return /(^|[\\/])\.githooks([\\/]|$)/i.test(p);
+  const parts = resolved.split(path.sep);
+  const idx = parts.findIndex((x) => x.toLowerCase() === '.githooks');
+  if (idx > 0) {
+    const candidate = parts.slice(0, idx).join(path.sep) || path.sep;
+    if (fs.existsSync(candidate)) {
+      const top = git(candidate, ['rev-parse', '--show-toplevel']);
+      if (top && samePath(top, candidate)) return true;
+    }
+  }
+  return removing && fs.existsSync(path.join(resolved, '.githooks', 'pre-push'));
+}
+
+function checkHookFile(name, args, ctx) {
+  if (name === 'sed' && !args.some((a) => /^(-i|--in-place)/.test(a))) return null;
+  const flagged = [];
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const l = a.toLowerCase();
+    if (PATH_PARAMS.includes(l)) { flagged.push(args[++i] || ''); continue; }
+    if (l.startsWith('--target-directory=')) { flagged.push(a.slice(a.indexOf('=') + 1)); continue; }
+    if (a.startsWith('-') && a.length > 1) continue;
+    positional.push(a);
+  }
+  // A copy only changes its destination.
+  const targets = COPIERS.has(name)
+    ? [...flagged, ...(flagged.length || positional.length < 2 ? [] : [positional[positional.length - 1]])]
+    : [...flagged, ...positional];
+  const removing = REMOVERS.has(name) || MOVERS.has(name);
+  const hit = targets.find((p) => isHookPath(p, ctx.cwd, removing));
+  return hit === undefined ? null : `${name} would delete or change the pre-push hook in .githooks ("${show(hit)}")`;
+}
+
+// ------------------------------------------------------------- GitHub (gh)
+
+// F: no writes to main and no merges through the GitHub CLI or API.
+function checkGh(args) {
+  let i = 0;
+  while (i < args.length && args[i].startsWith('-')) i += ['-R', '--repo'].includes(args[i]) ? 2 : 1;
+  const sub = (args[i] || '').toLowerCase();
+  if (sub === 'api') return checkGhApi(args.slice(i + 1));
+  if (sub === 'pr') {
+    let j = i + 1;
+    while (j < args.length && args[j].startsWith('-')) j += ['-R', '--repo'].includes(args[j]) ? 2 : 1;
+    if ((args[j] || '').toLowerCase() === 'merge') return 'gh pr merge merges a pull request; merging is a human gate';
+  }
+  return null;
+}
+
+const GRAPHQL_WRITES = /\b(mergePullRequest|mergeBranch|enablePullRequestAutoMerge|updateRefs?|createRef|deleteRef)\b/;
+
+function checkGhApi(args) {
+  let method = null;
+  let hasBody = false;
+  let hasInput = false; // request body read from a file or stdin: not inspected
+  let endpoint = null;
+  const fields = {};
+  const addField = (kv) => {
+    const eq = (kv || '').indexOf('=');
+    if (eq > 0) fields[kv.slice(0, eq).toLowerCase()] = kv.slice(eq + 1);
+    hasBody = true;
+  };
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j];
+    if (a === '-X' || a === '--method') { method = args[++j] || ''; continue; }
+    if (a.startsWith('--method=')) { method = a.slice('--method='.length); continue; }
+    if (/^-X./.test(a)) { method = a.slice(2); continue; }
+    if (['-f', '-F', '--raw-field', '--field'].includes(a)) { addField(args[++j]); continue; }
+    if (/^--(raw-)?field=/.test(a)) { addField(a.slice(a.indexOf('=') + 1)); continue; }
+    if (/^-[fF]./.test(a)) { addField(a.slice(2)); continue; }
+    if (a === '--input') { j++; hasBody = true; hasInput = true; continue; }
+    if (a.startsWith('--input=')) { hasBody = true; hasInput = true; continue; }
+    if (['-H', '--header', '-q', '--jq', '-t', '--template', '--cache', '--hostname', '-p', '--preview'].includes(a)) { j++; continue; }
+    if (a.startsWith('-') && a.length > 1) continue;
+    if (endpoint === null) endpoint = a;
+  }
+  if (endpoint === null) return null;
+  const verb = (method || (hasBody ? 'POST' : 'GET')).toUpperCase();
+  let ep = endpoint;
+  try { ep = decodeURIComponent(ep); } catch { /* keep as written */ }
+  ep = ep.replace(/^https?:\/\/[^/]+/i, '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '').replace(/^api\/v3\//i, '')
+    .replace(/\/{2,}/g, '/').toLowerCase();
+
+  if (ep === 'graphql') {
+    const query = fields.query || '';
+    const m = /\bmutation\b/i.test(query) && query.match(GRAPHQL_WRITES);
+    return m ? `gh api graphql runs the ${m[1]} mutation, which can merge or move branches` : null;
+  }
+  if (verb === 'GET' || verb === 'HEAD') return null;
+  const rest = (ep.match(/^repos\/[^/]+\/[^/]+\/(.*)$/) || [null, ep])[1];
+  const isMain = (v) => v === undefined || isDynamic(v) || /^(refs\/heads\/)?main$/i.test(v);
+  const what = `gh api ${verb} ${show(endpoint)}`;
+  if (/^git\/refs\/heads\/main$/.test(rest)) return `${what} writes refs/heads/main`;
+  if (rest === 'git/refs' && fields.ref !== undefined && (isDynamic(fields.ref) || /^refs\/heads\/main$/i.test(fields.ref))) {
+    return `${what} creates refs/heads/main`;
+  }
+  if (rest === 'git/refs' && fields.ref === undefined && hasInput) {
+    return `${what} creates a ref named in a request body file, so it cannot be checked against main`;
+  }
+  if (/^pulls\/[^/]+\/merge$/.test(rest)) return `${what} calls the pull request merge endpoint`;
+  if (rest === 'merges' && isMain(fields.base)) return `${what} merges into main`;
+  if (/^contents\//.test(rest) && (verb === 'PUT' || verb === 'DELETE')) {
+    if (fields.branch === undefined) return `${what} writes a file on the default branch (main)`;
+    if (isMain(fields.branch)) return `${what} writes a file on main`;
+  }
+  if (/^branches\/main(\/|$)/.test(rest)) return `${what} changes settings of branch main (e.g. its protection)`;
+  if (rest === 'merge-upstream' && isMain(fields.branch)) return `${what} updates main from upstream`;
   return null;
 }
 
