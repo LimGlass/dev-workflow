@@ -1,7 +1,7 @@
 ---
 id: GUARD-4            # Linear issue ID, e.g. NOVA-12
 title: "Versioned Git pre-push hook rejecting pushes to main, plus guard rules against skipping or disabling it"
-status: in-progress    # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
+status: human-gate     # draft | plan-review | ready | in-progress | impl-review | changes-requested | human-gate | done
 owner: claude          # implementing agent
 reviewer: codex
 branch: agent/claude/GUARD-4
