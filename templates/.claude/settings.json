@@ -8,7 +8,9 @@
       "Bash(esptool:*)",
       "Bash(idf.py flash:*)",
       "Bash(arduino-cli upload:*)",
-      "Read(./.env)"
+      "Read(./.env)",
+      "Edit(/.githooks/**)",
+      "Edit(/.git/config)"
     ],
     "ask": [
       "Bash(git push:*)"

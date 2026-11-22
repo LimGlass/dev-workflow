@@ -33,6 +33,18 @@ git(tracksMain, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
 git(tracksMain, 'config', 'branch.feat.remote', 'origin');
 git(tracksMain, 'config', 'branch.feat.merge', 'refs/heads/main');
 git(tracksMain, 'config', 'push.default', 'upstream');
+// Repos that ship .githooks/pre-push: not enabled, enabled, enabled by absolute path.
+function hookedRepo(name, hooksPath) {
+  const dir = repo(name, 'feature');
+  fs.mkdirSync(path.join(dir, '.githooks'));
+  fs.writeFileSync(path.join(dir, '.githooks', 'pre-push'), '#!/bin/sh\nexit 0\n');
+  if (hooksPath) git(dir, 'config', 'core.hooksPath', hooksPath(dir));
+  return dir;
+}
+const hookOff = hookedRepo('hook-off', null);
+const hookOn = hookedRepo('hook-on', () => '.githooks');
+const hookAbs = hookedRepo('hook-abs', (dir) => path.join(dir, '.githooks'));
+const hookElsewhere = hookedRepo('hook-elsewhere', () => 'other-hooks');
 
 const encoded = (s) => Buffer.from(s, 'utf16le').toString('base64');
 
@@ -172,6 +184,77 @@ const BLOCK = [
   { group: 'heredoc group', cmd: '{ bash; } <<\'EOF\'\ngit push origin main\nEOF' },
   { group: 'heredoc group', cmd: '(bash) <<\'EOF\'\ngit push origin main\nEOF' },
   { group: 'heredoc group', cmd: 'while true; do bash; done <<\'EOF\'\ngit push origin main\nEOF' },
+  // A: the repo ships .githooks/pre-push, so it must be enabled before any push
+  { group: 'hook active (A)', cmd: 'git push origin agent/claude/x', cwd: hookOff, reason: /core\.hooksPath/ },
+  { group: 'hook active (A)', cmd: 'git push --dry-run origin agent/claude/x', cwd: hookOff, reason: /core\.hooksPath/ },
+  { group: 'hook active (A)', cmd: 'git push origin agent/claude/x', cwd: hookElsewhere, reason: /core\.hooksPath/ },
+  { group: 'hook active (A)', cmd: `git -C "${hookOff}" push origin agent/claude/x`, reason: /core\.hooksPath/ },
+  { group: 'hook active (A)', cmd: 'git push origin agent/claude/x', cwd: hookOff, tool: 'PowerShell', reason: /core\.hooksPath/ },
+  // B: never skip the pre-push hook
+  { group: 'no-verify (B)', cmd: 'git push --no-verify origin agent/claude/x', reason: /no-verify/ },
+  { group: 'no-verify (B)', cmd: 'git push origin agent/claude/x --no-verify', reason: /no-verify/ },
+  { group: 'no-verify (B)', cmd: 'git push --no-verif origin agent/claude/x', reason: /no-verify/ },
+  { group: 'no-verify (B)', cmd: 'git push --no-veri -u origin agent/claude/x', reason: /no-verify/ },
+  { group: 'no-verify (B)', cmd: 'git push --no-verify origin agent/claude/x', tool: 'PowerShell', reason: /no-verify/ },
+  // C: never repoint core.hooksPath for a push
+  { group: 'hooksPath override (C)', cmd: 'git -c core.hooksPath=/dev/null push origin agent/claude/x', reason: /hooksPath/i },
+  { group: 'hooksPath override (C)', cmd: 'git -c core.hookspath=x push origin agent/claude/x', reason: /hooksPath/i },
+  { group: 'hooksPath override (C)', cmd: 'git --config-env=core.hooksPath=H push origin agent/claude/x', reason: /hooksPath/i },
+  { group: 'hooksPath override (C)', cmd: 'git --config-env core.hooksPath=H push origin agent/claude/x', reason: /hooksPath/i },
+  { group: 'hooksPath override (C)', cmd: 'GIT_CONFIG_PARAMETERS="\'core.hooksPath=x\'" git push origin agent/claude/x', reason: /GIT_CONFIG/ },
+  { group: 'hooksPath override (C)', cmd: 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=x git push origin agent/claude/x', reason: /GIT_CONFIG/ },
+  { group: 'hooksPath override (C)', cmd: 'env GIT_CONFIG_PARAMETERS=x git push origin agent/claude/x', reason: /GIT_CONFIG/ },
+  { group: 'hooksPath override (C)', cmd: 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=x\'"; git push origin agent/claude/x', reason: /GIT_CONFIG/ },
+  { group: 'hooksPath override (C)', cmd: '$env:GIT_CONFIG_PARAMETERS="\'core.hooksPath=x\'"; git push origin agent/claude/x', tool: 'PowerShell', reason: /GIT_CONFIG/ },
+  // D: never change core.hooksPath persistently (except to .githooks)
+  { group: 'hooksPath config (D)', cmd: 'git config core.hooksPath /dev/null', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config --global core.hooksPath x', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config --unset core.hooksPath', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config --unset-all core.hookspath', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config unset core.hooksPath', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config set core.hooksPath x', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config --file .git/config core.hooksPath x', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config -f .git/config core.hooksPath x', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config core.hooksPath $HOOKS', reason: /hooksPath/i },
+  { group: 'hooksPath config (D)', cmd: 'git config --remove-section core', reason: /core/ },
+  { group: 'hooksPath config (D)', cmd: 'git config --edit', reason: /edit/ },
+  { group: 'hooksPath config (D)', cmd: 'git config core.hooksPath x', tool: 'PowerShell', reason: /hooksPath/i },
+  // E: never delete, move or rewrite the hook
+  { group: 'hook file (E)', cmd: 'rm .githooks/pre-push', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'rm -rf .githooks', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'rm -f ./.githooks/pre-push', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'mv .githooks/pre-push /tmp/x', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'chmod -x .githooks/pre-push', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'git rm .githooks/pre-push', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'git mv .githooks old-hooks', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'cp /tmp/evil .githooks/pre-push', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: "sed -i 's/exit 1/exit 0/' .githooks/pre-push", reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'rm -rf .', cwd: hookOn, reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'Remove-Item .githooks/pre-push', tool: 'PowerShell', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'Remove-Item -Recurse -Force .githooks', tool: 'PowerShell', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'Set-Content .githooks/pre-push "exit 0"', tool: 'PowerShell', reason: /\.githooks/ },
+  // F: never write main or merge through the GitHub API
+  { group: 'gh api (F)', cmd: 'gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc123 -F force=true', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api --method DELETE repos/{owner}/{repo}/git/refs/heads/main', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api repos/o/r/git/refs -f ref=refs/heads/main -f sha=abc123', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PUT repos/o/r/pulls/3/merge', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh api --method=PUT /repos/o/r/pulls/3/merge -f merge_method=squash', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh api -XPOST repos/o/r/merges -f base=main -f head=feature', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PUT repos/o/r/contents/README.md -f message=m -f content=Zg== -f branch=main', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PUT repos/o/r/contents/README.md -f message=m -f content=Zg==', reason: /default branch|main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X DELETE repos/o/r/branches/main/protection', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main -f sha=abc123', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PATCH repos/o/r/git/refs/heads%2Fmain -f sha=abc123', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api graphql -f query=\'mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }\'', reason: /mergePullRequest/ },
+  { group: 'gh api (F)', cmd: 'gh api graphql -f query=\'mutation { updateRef(input: {refId: "x", oid: "y"}) { clientMutationId } }\'', reason: /updateRef/ },
+  { group: 'gh api (F)', cmd: 'gh pr merge 3 --squash', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh pr merge -R LimGlass/dev-workflow 3', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PUT repos/o/r/pulls/3/merge', tool: 'PowerShell', reason: /merge/ },
+  { group: 'gh api (F)', cmd: 'gh api -X PATCH repos/o/r/git/refs/heads/main/ -f sha=abc123', reason: /main/ },
+  { group: 'gh api (F)', cmd: 'gh api -X POST repos/o/r/git/refs --input body.json', reason: /cannot be checked/ },
+  { group: 'hooksPath override (C)', cmd: 'GIT_CONFIG_GLOBAL=/tmp/cfg git push origin agent/claude/x', reason: /GIT_CONFIG/ },
+  { group: 'hook file (E)', cmd: 'tee .githooks/pre-push <<\'EOF\'\nexit 0\nEOF', reason: /\.githooks/ },
+  { group: 'hook file (E)', cmd: 'truncate -s 0 .githooks/pre-push', reason: /\.githooks/ },
 ];
 
 const ALLOW = [
@@ -220,6 +303,35 @@ const ALLOW = [
   { group: 'piped', cmd: "printf 'git push origin main\\n' | cat" },
   { group: 'piped', cmd: "echo 'see `git push` docs' | tee log.txt" },
   { group: 'heredoc edge', cmd: 'cat <<A <<\'B\'\nfirst push note\nA\nsecond `upload` note\nB' },
+  // A-E: normal work around the pre-push hook stays allowed
+  { group: 'hook active (A)', cmd: 'git push origin agent/claude/x', cwd: hookOn },
+  { group: 'hook active (A)', cmd: 'git push origin agent/claude/x', cwd: hookAbs },
+  { group: 'hook active (A)', cmd: 'git push -u origin agent/claude/x', cwd: hookOn, tool: 'PowerShell' },
+  { group: 'no-verify (B)', cmd: 'git commit --no-verify -m wip' },
+  { group: 'no-verify (B)', cmd: 'git push --verbose origin agent/claude/x' },
+  { group: 'hooksPath config (D)', cmd: 'git config core.hooksPath .githooks' },
+  { group: 'hooksPath config (D)', cmd: 'git config --local core.hooksPath .githooks' },
+  { group: 'hooksPath config (D)', cmd: 'git config --get core.hooksPath' },
+  { group: 'hooksPath config (D)', cmd: 'git config get core.hooksPath' },
+  { group: 'hooksPath config (D)', cmd: 'git config --list --show-origin' },
+  { group: 'hooksPath config (D)', cmd: 'git config user.name test' },
+  { group: 'hooksPath config (D)', cmd: 'git -c core.hooksPath=x status' },
+  { group: 'hook file (E)', cmd: 'cat .githooks/pre-push' },
+  { group: 'hook file (E)', cmd: 'ls -la .githooks' },
+  { group: 'hook file (E)', cmd: 'git diff -- .githooks/pre-push' },
+  { group: 'hook file (E)', cmd: 'cp .githooks/pre-push templates/.githooks/pre-push' },
+  { group: 'hook file (E)', cmd: 'rm templates/.githooks/pre-push' },
+  { group: 'hook file (E)', cmd: 'Get-Content .githooks/pre-push', tool: 'PowerShell' },
+  // F: read-only API calls and branch-scoped writes stay allowed
+  { group: 'gh api (F)', cmd: 'gh api repos/o/r/git/refs/heads/main' },
+  { group: 'gh api (F)', cmd: 'gh api -X GET repos/o/r/git/refs/heads/main' },
+  { group: 'gh api (F)', cmd: 'gh api repos/o/r/pulls/3/merge' },
+  { group: 'gh api (F)', cmd: "gh api repos/o/r/pulls --paginate -q '.[].number'" },
+  { group: 'gh api (F)', cmd: 'gh api graphql -f query=\'query { repository(owner: "o", name: "r") { pullRequest(number: 3) { mergeable } } }\'' },
+  { group: 'gh api (F)', cmd: 'gh api -X PATCH repos/o/r/git/refs/heads/agent/claude/x -f sha=abc123' },
+  { group: 'gh api (F)', cmd: 'gh api -X PUT repos/o/r/contents/notes.md -f message=m -f content=Zg== -f branch=agent/claude/x' },
+  { group: 'gh api (F)', cmd: 'gh pr create --title t --body b' },
+  { group: 'gh api (F)', cmd: 'gh pr view 3 --json mergeable' },
 ];
 
 // --------------------------------------------------------------------- run
@@ -256,8 +368,9 @@ try {
     console.log(`\n== ${title} (${cases.length}) ==`);
     for (const c of cases) {
       const r = run(c);
-      const where = [c.tool === 'PowerShell' ? 'PowerShell' : '', c.cwd === onMain ? 'on main'
-        : c.cwd === tracksMain ? 'tracks origin/main' : ''].filter(Boolean).join(', ');
+      const cwdName = new Map([[onMain, 'on main'], [tracksMain, 'tracks origin/main'], [hookOff, 'hook not enabled'],
+        [hookOn, 'hook enabled'], [hookAbs, 'hook enabled, absolute path'], [hookElsewhere, 'hooksPath elsewhere']]);
+      const where = [c.tool === 'PowerShell' ? 'PowerShell' : '', cwdName.get(c.cwd) || ''].filter(Boolean).join(', ');
       const label = `[${c.group}] ${oneLine(c.cmd)}${where ? `  (${where})` : ''}`;
       // Optional `reason`: the block message must give this specific reason.
       const ok = r.status === want && (!c.reason || c.reason.test(r.stderr));
@@ -279,6 +392,8 @@ try {
     const deny = (settings.permissions && settings.permissions.deny) || [];
     report(deny.includes('Bash(git push origin main:*)') && deny.includes('Bash(esptool:*)'),
       'existing deny rules are kept');
+    report(deny.includes('Edit(/.githooks/**)') && deny.includes('Edit(/.git/config)'),
+      'file tools may not edit .githooks/ or .git/config');
   } else {
     console.log('SKIP  settings.json not found next to hooks/');
   }
@@ -291,6 +406,25 @@ try {
   if (fs.existsSync(templateTest)) {
     report(fs.readFileSync(templateTest, 'utf8') === fs.readFileSync(__filename, 'utf8'),
       'templates/.claude/hooks/guard.test.js matches .claude/hooks/guard.test.js');
+  }
+  // The pre-push hook lives at <root>/.githooks; root is two levels above this file.
+  const root = path.join(__dirname, '..', '..');
+  const hookFile = path.join(root, '.githooks', 'pre-push');
+  if (fs.existsSync(hookFile)) {
+    const attrs = path.join(root, '.gitattributes');
+    report(fs.existsSync(attrs) && /^\.githooks\/\*\s+text\s+eol=lf\s*$/m.test(fs.readFileSync(attrs, 'utf8')),
+      '.gitattributes keeps .githooks/* LF');
+    const hooksPath = (() => {
+      try {
+        return execFileSync('git', ['-C', root, 'config', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+      } catch {
+        return '';
+      }
+    })();
+    if (hooksPath) report(hooksPath === '.githooks', `core.hooksPath is .githooks (found "${hooksPath}")`);
+    else console.log('SKIP  core.hooksPath is not set in this clone (run: git config core.hooksPath .githooks)');
+  } else {
+    report(false, '.githooks/pre-push exists next to .claude/');
   }
 
   const blockCount = BLOCK.length;

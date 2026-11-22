@@ -1,0 +1,26 @@
+#!/bin/sh
+# pre-push: reject any push that would create, update or delete refs/heads/main.
+# Policy (ADR-0001): main changes only through pull requests merged by the owner.
+# Git runs this for every push, however git was invoked. Enable once per clone:
+#   git config core.hooksPath .githooks
+# Tests: node .githooks/pre-push.test.js
+
+remote="$1"
+url="$2"
+status=0
+
+# stdin: one line per ref: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  ref=$(printf '%s' "$remote_ref" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+  if [ "$ref" = "refs/heads/main" ]; then
+    if [ "$local_ref" = "(delete)" ]; then action="delete"; else action="update"; fi
+    echo "pre-push: refusing to $action $remote_ref on $remote ($url)." >&2
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "Policy (ADR-0001): main changes only through pull requests merged by the owner." >&2
+  echo "Push to an agent/* branch and open a pull request instead." >&2
+fi
+exit "$status"

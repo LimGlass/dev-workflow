@@ -18,7 +18,8 @@ Agents must never:
 - merge pull requests;
 - push to `main` (directly or via force-push);
 - flash firmware or upload to devices;
-- change hardware configuration or physical setups.
+- change hardware configuration or physical setups;
+- skip or disable Git hooks (`--no-verify`, changing `core.hooksPath`, editing or deleting `.githooks/`).
 
 These are human gates. When a task reaches one, set the task status to `human-gate`, log it, and stop.
 
