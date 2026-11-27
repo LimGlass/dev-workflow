@@ -4,6 +4,8 @@ Shared templates and cross-project decisions for my Claude Code + Codex developm
 
 Claude Code is the host and primary implementer; Codex reviews meaningful diffs (and high-risk plans) through the `codex-plugin-cc` plugin. The human owner approves high-risk plans and stays responsible for merges, firmware flashing, and hardware changes. See [ADR-0001](decisions/ADR-0001-claude-host-codex-reviewer.md).
 
+Since 2026-11-27, Codex may also implement `risk:normal` and `risk:low` tasks, in its own worktree and with its own sandbox limits; it commits locally, Claude or the owner pushes, and Claude reviews that work. `risk:hardware` and `risk:security` tasks stay with Claude as implementer. See [ADR-0003](decisions/ADR-0003-codex-implements-normal-risk.md).
+
 ## Layout
 
 ```
