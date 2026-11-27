@@ -3,6 +3,8 @@
 Shared rules for every coding agent (Claude Code, Codex) working in this repository.
 `CLAUDE.md` imports this file; keep project rules here, not there.
 
+**Roles:** Claude implements `risk:hardware` and `risk:security` tasks. Codex may implement `risk:normal` and `risk:low` tasks in its own worktree, commits locally only, and Claude reviews its work; Codex reviews Claude's work; the owner merges ([ADR-0003](https://github.com/LimGlass/dev-workflow/blob/main/decisions/ADR-0003-codex-implements-normal-risk.md), amending ADR-0001).
+
 ## Project commands
 
 - Build: `{{BUILD_COMMAND}}`
